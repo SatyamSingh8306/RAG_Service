@@ -1,0 +1,14 @@
+# Python virtual environment 
+__pycache__/ 
+*.py[cod] 
+*$py.class 
+.env 
+backend/.env 
+data/db/ 
+data/uploads/ 
+*.log 
+*.pot 
+*.sqlite3 
+.idea/ 
+.vscode/ 
+*.DS_Store 
