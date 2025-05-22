@@ -5,8 +5,8 @@ import os
 # Add the backend directory to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'backend'))
 
-# Import your frontend UI
-from frontend.ui import main as streamlit_main
+# Run the Streamlit app directly
+st.set_page_config(page_title="DocBot - Document Research & Theme ID", layout="wide")
 
-if __name__ == "__main__":
-    streamlit_main() 
+# Import and run the UI code
+import frontend.ui 
