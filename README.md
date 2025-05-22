@@ -1,3 +1,37 @@
+---
+title: Doc Theme Bot
+emoji: 📚
+colorFrom: blue
+colorTo: purple
+sdk: docker
+pinned: false
+---
+
+# Doc Theme Bot
+
+A document analysis and theme extraction bot built with Streamlit and LangChain.
+
+## Features
+
+- Document upload and processing
+- Theme extraction and analysis
+- Interactive UI for document exploration
+- Powered by LangChain and Hugging Face models
+
+## How to Use
+
+1. Upload your document using the file uploader
+2. Wait for the document to be processed
+3. Explore the extracted themes and insights
+4. Interact with the document through the chat interface
+
+## Technical Details
+
+- Built with Streamlit for the frontend
+- Uses LangChain for document processing
+- Implements Hugging Face models for analysis
+- Docker-based deployment for reliability
+
 🚀 DocBot: Document Research & Theme Identifier
 
 A full-stack AI-powered system built for deep document research, intelligent theme identification, and citation-based answers — designed as part of the Generative AI Internship Task at Wasserstoff.

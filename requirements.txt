@@ -22,3 +22,4 @@ langchain-text-splitters
 langchain-community
 # Additional dependencies for deployment
 huggingface-hub
+gunicorn
