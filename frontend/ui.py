@@ -144,7 +144,7 @@ def display_chat_message(role: str, content: Any):
                     for doc in document_details:
                         col1, col2, col3 = st.columns([1, 2, 1])
                         with col1:
-                            st.markdown(f"**Doc ID:**\n`{doc.get('document_id', 'N/A')}`")
+                            st.markdown(f"**Doc ID:**\n`{doc.get('source_doc_id', 'N/A')}`")
                         with col2:
                             st.markdown(f"**Content:**\n_{doc.get('extracted_answer', 'No content available')}_")
                         with col3:
@@ -227,12 +227,12 @@ with st.sidebar:
     if not st.session_state.selected_collection:
         st.warning("Please select or create a collection first")
     else:
-    uploaded_files = st.file_uploader(
-        "Upload Documents (PDF, PNG, JPG, TIFF)",
-        type=["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "gif"],
-        accept_multiple_files=True,
-        key="file_uploader" 
-    )
+        uploaded_files = st.file_uploader(
+            "Upload Documents (PDF, PNG, JPG, TIFF)",
+            type=["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "gif"],
+            accept_multiple_files=True,
+            key="file_uploader" 
+        )
 
     if uploaded_files:
         if st.button("Process Uploaded Documents", type="primary", use_container_width=True):
