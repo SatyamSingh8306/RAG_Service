@@ -1,25 +1,25 @@
 # Add your project requirements here 
 # For example: 
-fastapi 
-uvicorn[standard] 
-streamlit 
-python-dotenv  
-pypdf 
-pytesseract 
-Pillow 
-unstructured 
-tiktoken 
-pydantic_settings
-langchain-huggingface
-langchain-chroma
-chromadb
-sentence-transformers
-fitz
-tools
-python-multipart
-requests
-langchain-text-splitters
-langchain-community
+fastapi>=0.68.0
+uvicorn[standard]>=0.15.0
+streamlit>=1.22.0
+python-dotenv>=0.19.0
+pypdf>=3.0.0
+pytesseract>=0.3.8
+Pillow>=9.0.0
+unstructured>=0.10.0
+tiktoken>=0.3.0
+pydantic_settings>=2.0.0
+langchain-huggingface>=0.0.5
+langchain-chroma>=0.0.1
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+fitz>=0.0.1
+tools>=0.0.1
+python-multipart>=0.0.5
+requests>=2.28.0
+langchain-text-splitters>=0.0.1
+langchain-community>=0.0.10
 # Additional dependencies for deployment
-huggingface-hub
-gunicorn
+huggingface-hub>=0.16.0
+gunicorn>=20.1.0

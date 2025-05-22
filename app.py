@@ -6,7 +6,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'backend'))
 
 # Import your frontend UI
-from frontend.ui import main
+from frontend.ui import main as streamlit_main
 
 if __name__ == "__main__":
-    main() 
+    streamlit_main() 
