@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional, Dict, Any
+from dotenv import load_dotenv
+load_dotenv()
 
 print(f"Current working directory: {os.getcwd()}") # DEBUGGING
 print(f"Script __file__: {__file__}") # DEBUGGING
@@ -32,7 +34,7 @@ class Settings(BaseSettings):
     """
     print("--- Inside Settings class definition ---") # DEBUGGING
     # --- Primary API Key ---
-    OPENROUTER_API_KEY: Optional[str] = None
+    OPENROUTER_API_KEY: Optional[str] = os.environ.get("OPENROUTER_API_KEY")
 
     # --- LLM Configuration ---
     DEFAULT_LLM_PROVIDER: str = "openrouter"

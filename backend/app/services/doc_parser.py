@@ -8,8 +8,16 @@ import os
 import uuid
 from typing import List, Dict, Any, Optional, Tuple
 import time # For potential retries or delays
+from pathlib import Path
 
 import requests # For calling OpenRouter API
+
+#loading langchain_loaders to handle multiple files
+from langchain_community.document_loaders import UnstructuredExcelLoader, CSVLoader, UnstructuredPowerPointLoader, Docx2txtLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from pptx import Presentation
+import pandas as pd
 
 # Local application imports
 from backend.app.core.config import settings, PROJECT_ROOT_DIR
@@ -28,10 +36,82 @@ class DocParserService:
     """
     Service to parse documents (PDFs, images), extract text, 
     perform LLM-based semantic chunking, and add chunks to the vector store.
+    Now supports structure-aware parsing and multiple file types.
     """
-    def __init__(self, vector_store_service: VectorStoreService):
+    def __init__(self, vector_store_service: VectorStoreService, use_llm_chunking: bool = True):
         self.vector_store_service = vector_store_service
-        print("DocParserService initialized (LLM-Only Chunking Mode).")
+        self.use_llm_chunking = use_llm_chunking
+        
+        # Initialize embeddings for semantic chunking (fallback to LLM)
+        try:
+            self.embeddings = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                model_kwargs={'device': 'cpu'},
+                encode_kwargs={"normalize_embeddings": True}
+            )
+            self.semantic_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=800,
+                chunk_overlap=200,
+                length_function=len,
+                is_separator_regex=False,
+            )
+        except Exception as e:
+            print(f"Error initializing embedding model: {e}. Using fallback splitter.")
+            self.embeddings = None
+            self.semantic_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200,
+                length_function=len,
+                is_separator_regex=False,
+                separators=["\n\n", "\n", ". ", "? ", "! ", ",", " ", ""]
+            )
+        
+        print(f"DocParserService initialized ({'LLM' if use_llm_chunking else 'Semantic'} Chunking Mode).")
+
+    def _is_heading(self, text: str) -> bool:
+        """
+        Detect if a line/paragraph is a heading based on heuristic:
+        - Mostly uppercase or capitalized and short (< 8 words)
+        """
+        words = text.strip().split()
+        if len(words) <= 8 and sum(1 for w in words if w.isupper()) >= len(words) * 0.6:
+            return True
+        return False
+
+    def _extract_sections_from_pdf(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Extracts text from PDF and groups paragraphs into sections by detecting headings.
+        Returns list of sections with 'title', 'page_number', and 'paragraphs'.
+        """
+        sections = []
+        doc = fitz.open(file_path)
+        section_counter = 0
+        for page_index in range(len(doc)):
+            page = doc.load_page(page_index)
+            blocks = page.get_text("blocks", sort=True)
+            current_section = {"title": f"page_{page_index+1}_untitled", "page_number": page_index+1, "paragraphs": []}
+            for block in blocks:
+                if block[6] != 0:
+                    continue
+                text = block[4].replace('\r', ' ').replace('\n', ' ').strip()
+                if not text:
+                    continue
+                if self._is_heading(text):
+                    # start new section
+                    if current_section["paragraphs"]:
+                        sections.append(current_section)
+                    section_counter += 1
+                    current_section = {"title": text, "page_number": page_index+1, "paragraphs": [], "section_index": section_counter}
+                else:
+                    current_section["paragraphs"].append(text)
+            if current_section["paragraphs"]:
+                # ensure section_index for untitled sections
+                if "section_index" not in current_section:
+                    section_counter += 1
+                    current_section["section_index"] = section_counter
+                sections.append(current_section)
+        doc.close()
+        return sections
 
     def _extract_text_from_pdf(self, file_path: str) -> List[Dict[str, Any]]:
         """
@@ -68,6 +148,124 @@ class DocParserService:
         except Exception as e:
             print(f"Error extracting text from PDF {os.path.basename(file_path)}: {e}")
         return pages_content
+    
+    def _extract_text_from_pptx(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Extract the text from each slide of pptx 
+        Each item in the list represents a slide, containing a list of paragraphs.
+        """
+        sections = []
+        try:
+            prs = Presentation(file_path)
+            section_counter = 0
+
+            for i, slide in enumerate(prs.slides):
+                paragraphs = []
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        text = shape.text.strip()
+                        if text:
+                            paragraphs.append(text)
+
+                current_section = {
+                    "title": f"slide_{i+1}_untitled",
+                    "page_number": i + 1,
+                    "paragraphs": paragraphs
+                }
+                if current_section["paragraphs"]:
+                    # ensure section_index for untitled sections
+                    if "section_index" not in current_section:
+                        section_counter += 1
+                        current_section["section_index"] = section_counter
+                    sections.append(current_section)
+
+            print(f"Extracted {len(sections)} slides with paragraphs from PPT: {os.path.basename(file_path)}")
+        except Exception as e:
+            print(f"Error in extracting the text from pptx document {os.path.basename(file_path)}: {e}")
+        return sections
+    
+
+    def _extract_text_from_csv(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Extract the text from CSV file
+        RET list of item containing page number with their paragraphs
+        """
+        sections = []
+        section_counter = 0
+        try:
+            loader = CSVLoader(file_path=file_path)
+            documents = loader.load_and_split(text_splitter=self.semantic_splitter)
+            for i in range(len(documents)):
+                current_section = {"title": f"page_{i+1}_untitled", "page_number": i+1, "paragraphs": []}
+                current_section["paragraphs"].append(documents[i].page_content)
+                if current_section["paragraphs"]:
+                    # ensure section_index for untitled sections
+                    if "section_index" not in current_section:
+                        section_counter += 1
+                        current_section["section_index"] = section_counter
+                    sections.append(current_section)
+            print(f"Extracted {len(documents)} lines of data from csv file {os.path.basename(file_path)}")
+        except Exception as e:
+            print(f"Error in extracting the text from csv file {os.path.basename(file_path)}: {e}")
+        return sections
+
+    def _extract_text_from_excel(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Extract text from Excel file and split into sections.
+        Returns list of sections with 'title', 'page_number', and 'paragraphs'.
+        """
+        sections = []
+        section_counter = 0
+        try:
+            excel_file = pd.ExcelFile(file_path)
+                
+            for i, sheet_name in enumerate(excel_file.sheet_names):
+                df = pd.read_excel(file_path, sheet_name=sheet_name)
+                    
+                # Convert to string format
+                text_content = df.to_string(index=False)
+                    
+                current_section = {
+                        "title": f"sheet_{i+1}",
+                        "page_number": i+1,
+                        "paragraphs": [text_content],
+                    }
+                if current_section["paragraphs"]:
+                    # ensure section_index for untitled sections
+                    if "section_index" not in current_section:
+                        section_counter += 1
+                        current_section["section_index"] = section_counter
+                    sections.append(current_section)
+                
+            print(f"Extracted {len(sections)} sheets from Excel file {os.path.basename(file_path)}")
+        except Exception as e:
+            print(f"Error in extracting the text from Excel file {os.path.basename(file_path)}: {e}")
+        return sections
+    
+    def _extract_text_from_docx(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Extract text from DOCX file and split into sections.
+        Returns list of sections with 'title', 'page_number', and 'paragraphs'.
+        """
+        sections = []
+        section_counter = 0
+        try:
+            loader = Docx2txtLoader(file_path=file_path)
+            documents = loader.load()
+            
+            for i, doc in enumerate(documents):
+                text = doc.page_content.strip()
+                if not text:
+                    continue
+                current_section = {"title": f"page_{i+1}_untitled", "page_number": i+1, "paragraphs": [text]}
+                section_counter += 1
+                current_section["section_index"] = section_counter
+                sections.append(current_section)
+
+            print(f"Extracted {len(sections)} sections from DOCX file {os.path.basename(file_path)}")
+        except Exception as e:
+            print(f"Error in extracting the text from DOCX file {os.path.basename(file_path)}: {e}")
+        return sections
 
     def _extract_text_from_image_ocr(self, file_path: str) -> List[Dict[str, Any]]:
         """
@@ -103,6 +301,17 @@ class DocParserService:
         except Exception as e:
             print(f"Error extracting text from image {os.path.basename(file_path)} using OCR: {e}")
         return pages_content
+
+    def _perform_semantic_chunking(self, text: str) -> List[str]:
+        """
+        Perform semantic chunking on text using embeddings, fallback if needed.
+        Here we use RecursiveCharacterTextSplitter for INSTRUCTOR-compatible chunking.
+        """
+        try:
+            return self.semantic_splitter.split_text(text)
+        except Exception as e:
+            print(f"Chunking failed: {e}")
+            return [text]  # fallback to whole text if even fallback splitter fails
 
     def _chunk_paragraph_semantically_llm(self, paragraph_text: str, source_info: str) -> List[str]:
         """
@@ -168,25 +377,36 @@ Semantically coherent chunks (each on a new line):"""
             print(f"Unexpected error during LLM semantic chunking ({source_info}): {e}. This paragraph will not be chunked.")
             return []
 
-    def process_document(self, file_path: str, source_doc_id: str) -> bool:
+    def process_document(self, file_path: str, source_doc_id: str, collection_name: Optional[str] = None) -> bool:
         """
-        Processes a single document: extracts text, performs LLM semantic chunking, 
+        Processes a single document: extracts text, performs chunking (LLM or semantic), 
         and adds resulting chunks to the vector store.
-        If LLM chunking is unavailable or fails for a paragraph, that paragraph yields no chunks.
         """
-        print(f"\nProcessing document: {os.path.basename(file_path)} (Source ID: {source_doc_id}, Mode: LLM-Only Chunking)")
-        file_extension = os.path.splitext(file_path)[1].lower()
+        print(f"\nProcessing document: {os.path.basename(file_path)} (Source ID: {source_doc_id}, Mode: {'LLM' if self.use_llm_chunking else 'Semantic'} Chunking)")
+        file_extension = Path(file_path).suffix.lower()
         
-        extracted_pages_content: List[Dict[str, Any]] = []
+        # Extract text based on file type
+        extracted_content: List[Dict[str, Any]] = []
         if file_extension == ".pdf":
-            extracted_pages_content = self._extract_text_from_pdf(file_path)
+            if self.use_llm_chunking:
+                extracted_content = self._extract_text_from_pdf(file_path)
+            else:
+                extracted_content = self._extract_sections_from_pdf(file_path)
+        elif file_extension == ".pptx":
+            extracted_content = self._extract_text_from_pptx(file_path)
+        elif file_extension == ".csv":
+            extracted_content = self._extract_text_from_csv(file_path)
+        elif file_extension == ".xlsx":
+            extracted_content = self._extract_text_from_excel(file_path)
+        elif file_extension == ".docx":
+            extracted_content = self._extract_text_from_docx(file_path)
         elif file_extension in [".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".gif"]:
-            extracted_pages_content = self._extract_text_from_image_ocr(file_path)
+            extracted_content = self._extract_text_from_image_ocr(file_path)
         else:
             print(f"Unsupported file type: {file_extension} for {file_path}")
             return False
 
-        if not extracted_pages_content:
+        if not extracted_content:
             print(f"No text could be extracted from {file_path}.")
             return False
 
@@ -197,65 +417,114 @@ Semantically coherent chunks (each on a new line):"""
         total_paragraphs_processed = 0
         total_chunks_generated = 0
 
-        for page_content in extracted_pages_content:
-            page_num = page_content["page_number"]
-            for paragraph_data in page_content.get("paragraphs", []):
-                total_paragraphs_processed += 1
-                para_num = paragraph_data["paragraph_number_in_page"]
-                para_text = paragraph_data["text"]
-                source_info_for_llm = f"Doc: {source_doc_id}, Page: {page_num}, Para: {para_num}"
+        if self.use_llm_chunking:
+            # LLM-based chunking (original method)
+            for page_content in extracted_content:
+                page_num = page_content["page_number"]
+                for paragraph_data in page_content.get("paragraphs", []):
+                    total_paragraphs_processed += 1
+                    para_num = paragraph_data["paragraph_number_in_page"]
+                    para_text = paragraph_data["text"]
+                    source_info_for_llm = f"Doc: {source_doc_id}, Page: {page_num}, Para: {para_num}"
 
-                current_paragraph_chunks: List[str] = []
-
-                # Always attempt LLM semantic chunking
-                current_paragraph_chunks = self._chunk_paragraph_semantically_llm(para_text, source_info_for_llm)
-                
-                if not current_paragraph_chunks:
-                     print(f"LLM semantic chunking yielded no chunks for {source_info_for_llm} (or API key was missing/call failed). This paragraph is skipped.")
-                
-                for chunk_seq, chunk_text in enumerate(current_paragraph_chunks):
-                    total_chunks_generated +=1
-                    # Create a unique ID for each chunk
-                    chunk_id = f"{source_doc_id}_p{page_num}_pr{para_num}_c{chunk_seq+1}"
+                    current_paragraph_chunks: List[str] = []
+                    current_paragraph_chunks = self._chunk_paragraph_semantically_llm(para_text, source_info_for_llm)
+                    
+                    if not current_paragraph_chunks:
+                         print(f"LLM semantic chunking yielded no chunks for {source_info_for_llm} (or API key was missing/call failed). This paragraph is skipped.")
+                    
+                    for chunk_seq, chunk_text in enumerate(current_paragraph_chunks):
+                        total_chunks_generated +=1
+                        # Create a unique ID for each chunk
+                        chunk_id = f"{source_doc_id}_p{page_num}_pr{para_num}_c{chunk_seq+1}"
+                        metadata = {
+                            "source_doc_id": source_doc_id,
+                            "file_name": os.path.basename(file_path),
+                            "page_number": page_num,
+                            "paragraph_number_in_page": para_num, # Paragraph from which this chunk originated
+                            "chunk_sequence_in_paragraph": chunk_seq + 1, # Sequence of this chunk within the original paragraph
+                            "original_paragraph_text_preview": para_text[:150] + "..." # For context during review
+                        }
+                        all_final_chunks_texts.append(chunk_text)
+                        all_final_chunks_metadatas.append(metadata)
+                        all_final_chunks_ids.append(chunk_id)
+        else:
+            # Semantic chunking (new method)
+            global_chunk_counter = 1
+            for section in extracted_content:
+                section_text = "\n\n".join(section["paragraphs"])
+                chunks = self._perform_semantic_chunking(section_text)
+                for idx, chunk in enumerate(chunks):
+                    sec_idx = section.get("section_index", section["page_number"])
+                    chunk_id = f"{source_doc_id}_sec{sec_idx}_chunk{global_chunk_counter}"
                     metadata = {
                         "source_doc_id": source_doc_id,
-                        "file_name": os.path.basename(file_path),
-                        "page_number": page_num,
-                        "paragraph_number_in_page": para_num, # Paragraph from which this chunk originated
-                        "chunk_sequence_in_paragraph": chunk_seq + 1, # Sequence of this chunk within the original paragraph
-                        "original_paragraph_text_preview": para_text[:150] + "..." # For context during review
+                        "file_name": Path(file_path).name,
+                        "section_title": section["title"],
+                        "page_number": section["page_number"],
+                        "section_index": sec_idx,
+                        "chunk_index": global_chunk_counter,
+                        "paragraph_number_in_page": idx + 1
                     }
-                    all_final_chunks_texts.append(chunk_text)
+                    all_final_chunks_texts.append(chunk)
                     all_final_chunks_metadatas.append(metadata)
                     all_final_chunks_ids.append(chunk_id)
+                    global_chunk_counter += 1
+                    total_chunks_generated += 1
         
         print(f"\nFinished processing {os.path.basename(file_path)}.")
         print(f"Total paragraphs analyzed: {total_paragraphs_processed}")
-        print(f"Total chunks generated via LLM: {total_chunks_generated}")
+        print(f"Total chunks generated: {total_chunks_generated}")
 
         if all_final_chunks_texts:
-            print(f"Attempting to add {len(all_final_chunks_texts)} LLM-generated chunks to vector store...")
+            print(f"Attempting to add {len(all_final_chunks_texts)} chunks to vector store...")
             success = self.vector_store_service.add_documents(
                 chunks=all_final_chunks_texts,
                 metadatas=all_final_chunks_metadatas,
-                doc_ids=all_final_chunks_ids
+                doc_ids=all_final_chunks_ids,
+                collection_name=collection_name
             )
             if success:
-                print(f"Successfully added LLM-generated chunks from {os.path.basename(file_path)} to vector store.")
+                print(f"Successfully added chunks from {os.path.basename(file_path)} to vector store.")
                 return True
             else:
-                print(f"Failed to add LLM-generated chunks from {os.path.basename(file_path)} to vector store.")
+                print(f"Failed to add chunks from {os.path.basename(file_path)} to vector store.")
                 return False
         else:
-            print(f"No LLM-generated chunks were produced from {os.path.basename(file_path)} to add to vector store.")
-            # Consider this a successful processing run if no text was extractable or no chunks were made,
-            # but nothing to add to DB. Or return False if chunks are mandatory.
-            # For now, returning False if nothing to add.
+            print(f"No chunks were produced from {os.path.basename(file_path)} to add to vector store.")
             return False
+
+def process_document_background(
+    file_path: str, 
+    source_doc_id: str, 
+    doc_parser_svc_instance: DocParserService,
+    serial_no: Optional[int] = None, 
+    total_count: Optional[int] = None,
+    collection_name: Optional[str] = None
+):
+    """
+    Background processing function for documents.
+    """
+    parser_name = doc_parser_svc_instance.__class__.__name__
+    progress_log = f"Document {serial_no}/{total_count}" if serial_no and total_count else "Single document"
+    
+    print(f"Background task started for: {Path(file_path).name}, Source ID: {source_doc_id}, Parser: {parser_name}, ({progress_log})")
+    try:
+        success = doc_parser_svc_instance.process_document(
+            file_path=file_path, 
+            source_doc_id=source_doc_id,
+            collection_name=collection_name
+        )
+        if success:
+            print(f"Background processing completed successfully for {source_doc_id} ({Path(file_path).name}) using {parser_name}")
+        else:
+            print(f"Background processing (using {parser_name}) had issues or no chunks generated for {source_doc_id} ({Path(file_path).name})")
+    except Exception as e:
+        print(f"Error during background document processing for {source_doc_id} ({Path(file_path).name}) (using {parser_name}): {e}")
 
 # --- Test Block ---
 if __name__ == "__main__":
-    print("--- Testing DocParserService (LLM-Only Chunking) ---")
+    print("--- Testing DocParserService (Enhanced with Multiple Chunking Modes) ---")
 
     print(f"OpenRouter API Key available for test: {'Yes' if settings.OPENROUTER_API_KEY else 'No'}")
     if not settings.OPENROUTER_API_KEY:
@@ -267,55 +536,42 @@ if __name__ == "__main__":
     if not vstore_service_instance._langchain_chroma_instance:
         print("CRITICAL: VectorStoreService did not initialize correctly. Aborting test.")
     else:
-        parser_service = DocParserService(vector_store_service=vstore_service_instance)
-
-        test_data_dir = os.path.join(PROJECT_ROOT_DIR, "test_documents")
-        os.makedirs(test_data_dir, exist_ok=True)
-
-        dummy_pdf_path = os.path.join(test_data_dir, "dummy_llm_only.pdf")
-        try:
-            pdf_doc = fitz.open() 
-            page = pdf_doc.new_page()
-            page.insert_text((72, 72), "The first paragraph for LLM chunking. It talks about AI and its impact on modern software development. This field is rapidly evolving.")
-            page.insert_text((72, 144), "Another distinct idea: renewable energy sources are crucial for a sustainable future. Solar and wind power are leading examples.")
-            page = pdf_doc.new_page()
-            page.insert_text((72, 72), "Page two has a very short paragraph. Just this one sentence.")
-            pdf_doc.save(dummy_pdf_path)
-            pdf_doc.close()
-            print(f"Created dummy PDF for LLM-only test: {dummy_pdf_path}")
-        except Exception as e:
-            print(f"Could not create dummy PDF: {e}.")
-
-        dummy_image_path = os.path.join(test_data_dir, "dummy_llm_only.png")
-        try:
-            img = Image.new('RGB', (700, 200), color = 'white')
-            from PIL import ImageDraw # Import here to avoid error if Pillow not fully installed for main script
-            d = ImageDraw.Draw(img)
-            d.text((10,10), "OCR text for the LLM. This is the first sentence.\nThis is the second sentence of the first paragraph for OCR.\n\nA new paragraph begins here for OCR testing. It should be processed separately.", fill=(0,0,0))
-            img.save(dummy_image_path)
-            print(f"Created dummy PNG for LLM-only test: {dummy_image_path}")
-        except Exception as e:
-            print(f"Could not create dummy PNG: {e}.")
-
-        # --- Test Case 1: Process PDF (Always uses LLM Chunking) ---
-        print("\n--- Test Case 1: PDF Processing (LLM-Only Chunking) ---")
-        if os.path.exists(dummy_pdf_path):
-            parser_service.process_document(
-                file_path=dummy_pdf_path,
-                source_doc_id="llm_only_pdf_test"
+        # Test both chunking modes
+        for use_llm in [True, False]:
+            chunking_mode = "LLM" if use_llm else "Semantic"
+            print(f"\n--- Testing {chunking_mode} Chunking Mode ---")
+            
+            parser_service = DocParserService(
+                vector_store_service=vstore_service_instance,
+                use_llm_chunking=use_llm
             )
-        else:
-            print(f"Skipping Test Case 1: Dummy PDF not found at {dummy_pdf_path}")
 
-        # --- Test Case 2: Process Image with OCR (Always uses LLM Chunking for OCR'd text) ---
-        print("\n--- Test Case 2: Image with OCR (LLM-Only Chunking for OCR'd text) ---")
-        if os.path.exists(dummy_image_path):
-            parser_service.process_document(
-                file_path=dummy_image_path,
-                source_doc_id="llm_only_image_test"
-            )
-        else:
-            print(f"Skipping Test Case 2: Dummy Image not found at {dummy_image_path}")
+            test_data_dir = os.path.join(PROJECT_ROOT_DIR, "test_documents")
+            os.makedirs(test_data_dir, exist_ok=True)
+
+            # Create test files
+            dummy_pdf_path = os.path.join(test_data_dir, f"dummy_{chunking_mode.lower()}.pdf")
+            try:
+                pdf_doc = fitz.open() 
+                page = pdf_doc.new_page()
+                page.insert_text((72, 72), "The first paragraph for chunking. It talks about AI and its impact on modern software development. This field is rapidly evolving.")
+                page.insert_text((72, 144), "Another distinct idea: renewable energy sources are crucial for a sustainable future. Solar and wind power are leading examples.")
+                page = pdf_doc.new_page()
+                page.insert_text((72, 72), "Page two has a very short paragraph. Just this one sentence.")
+                pdf_doc.save(dummy_pdf_path)
+                pdf_doc.close()
+                print(f"Created dummy PDF for {chunking_mode} test: {dummy_pdf_path}")
+            except Exception as e:
+                print(f"Could not create dummy PDF: {e}.")
+
+            # Test document processing
+            if os.path.exists(dummy_pdf_path):
+                parser_service.process_document(
+                    file_path=dummy_pdf_path,
+                    source_doc_id=f"{chunking_mode.lower()}_pdf_test"
+                )
+            else:
+                print(f"Skipping {chunking_mode} test: Dummy PDF not found at {dummy_pdf_path}")
         
-        print("\n--- DocParserService (LLM-Only Chunking) Test Complete ---")
+        print("\n--- DocParserService Enhanced Test Complete ---")
  

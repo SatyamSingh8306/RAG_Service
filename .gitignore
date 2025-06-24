@@ -12,3 +12,5 @@ data/uploads/
 .idea/ 
 .vscode/ 
 *.DS_Store 
+project
+trail.ipynb
