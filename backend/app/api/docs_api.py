@@ -10,11 +10,12 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Backgro
 # Import schemas
 from backend.app.models.schemas import DocumentProcessResponse 
 # REMOVED: ProcessingMode from schemas import as it's no longer a choice from frontend
+from pydantic import BaseModel, HttpUrl
 
 # Import services and settings
 from backend.app.core.config import settings
 # REMOVED: from backend.app.services.doc_parser import DocParserService 
-from backend.app.services.doc_parser_fast import DocParserFastService # ONLY Fast rule-based parser
+from backend.app.services.doc_parser_fast import DocParserFastService, process_url_background # ONLY Fast rule-based parser
 from backend.app.services.vstore_svc import VectorStoreService 
 from backend.app.core.utils import get_next_document_id
 
@@ -66,6 +67,47 @@ def process_document_background(
             print(f"Background processing (using {parser_name}) had issues or no chunks generated for {source_doc_id} ({Path(file_path).name})")
     except Exception as e:
         print(f"Error during background document processing for {source_doc_id} ({Path(file_path).name}) (using {parser_name}): {e}")
+
+class URLProcessRequest(BaseModel):
+    url: HttpUrl
+    collection: Optional[str] = None
+
+@router.post("/process-url", response_model=DocumentProcessResponse, status_code=202)
+async def process_url(
+    request: URLProcessRequest,
+    background_tasks: BackgroundTasks,
+    fast_parser: DocParserFastService = Depends(get_doc_parser_fast_service),
+    vstore_svc: VectorStoreService = Depends(get_vector_store_service)
+):
+    """
+    Processes a document from a URL.
+    """
+    source_doc_id = get_next_document_id()
+    
+    # Validate collection if provided
+    if request.collection:
+        try:
+            vstore_svc.get_collection(request.collection)
+        except Exception as e:
+            if "does not exist" in str(e).lower():
+                raise HTTPException(status_code=404, detail=f"Collection '{request.collection}' not found")
+            raise HTTPException(status_code=500, detail=f"Error validating collection: {str(e)}")
+
+    background_tasks.add_task(
+        process_url_background,
+        url=str(request.url),
+        source_doc_id=source_doc_id,
+        doc_parser_svc_instance=fast_parser,
+        collection_name=request.collection
+    )
+    
+    return DocumentProcessResponse(
+        message="URL received and queued for background processing.",
+        file_name=str(request.url),
+        source_doc_id=source_doc_id,
+        status="queued_for_processing",
+        processing_mode_used="fast_rule_based"
+    )
 
 @router.post("/upload", response_model=DocumentProcessResponse, status_code=202)
 async def upload_document(

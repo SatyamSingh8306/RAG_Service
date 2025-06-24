@@ -11,7 +11,8 @@ import json
 BACKEND_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8000")
 # The backend will now always use the fast parser.
 # The `processing_mode` parameter will be removed from the API call.
-DOCUMENTS_UPLOAD_URL = f"{BACKEND_URL}/api/v1/documents/upload-multiple" 
+DOCUMENTS_UPLOAD_URL = f"{BACKEND_URL}/api/v1/documents/upload-multiple"
+URL_PROCESS_URL = f"{BACKEND_URL}/api/v1/documents/process-url"
 CHAT_QUERY_URL = f"{BACKEND_URL}/api/v1/chat/query"
 COLLECTIONS_URL = f"{BACKEND_URL}/api/v1/collections"
 
@@ -226,13 +227,47 @@ def main():
         st.subheader("Document Upload")
         st.info("Using fast, rule-based document chunking.")
 
+        # URL Processing Section
+        st.subheader("Process from URL")
+        url_input = st.text_input("Enter a URL to process")
+        if st.button("Process URL", use_container_width=True):
+            if not st.session_state.selected_collection:
+                st.warning("Please select or create a collection first")
+            elif not url_input:
+                st.warning("Please enter a URL")
+            else:
+                try:
+                    with st.spinner(f"Sending URL for processing..."):
+                        response = requests.post(
+                            URL_PROCESS_URL,
+                            json={"url": url_input, "collection": st.session_state.selected_collection},
+                            timeout=60
+                        )
+                        response.raise_for_status()
+                        result = response.json()
+                        st.success(f"URL '{result.get('file_name')}' (ID: {result.get('source_doc_id')}) queued for processing.")
+                        # Add to uploaded documents log
+                        existing_names = {f['name'] for f in st.session_state.uploaded_file_details}
+                        if result['file_name'] not in existing_names:
+                            st.session_state.uploaded_file_details.append({
+                                "name": result['file_name'],
+                                "status": "Queued",
+                                "doc_id": result.get('source_doc_id')
+                            })
+                            st.rerun()
+
+                except Exception as e:
+                    st.error(f"Error processing URL: {e}")
+
+        st.markdown("---")
+
         uploaded_files = []  # Initialize the variable
         if not st.session_state.selected_collection:
             st.warning("Please select or create a collection first")
         else:
             uploaded_files = st.file_uploader(
                 "Upload Documents (PDF, PNG, JPG, TIFF)",
-                type=["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "gif"],
+                type=["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "gif", "docx", "pptx" , "csv", "json", "xlsx", "txt"],
                 accept_multiple_files=True,
                 key="file_uploader" 
             )
