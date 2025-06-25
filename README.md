@@ -184,12 +184,12 @@ Running the Application
 Start the backend server:
 
 cd backend
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --port 8000
 
 In a new terminal, start the frontend:
 
 cd frontend
-streamlit run ui.py
+streamlit run .\frontened\ui.py 
 
 Access the application at http://localhost:8501
 

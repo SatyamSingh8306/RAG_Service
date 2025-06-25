@@ -6,7 +6,8 @@ from typing import List, Dict, Any, Optional, Tuple
 import time 
 
 # Local application imports
-from backend.app.core.config import settings 
+# from backend.app.core.config import settings 
+from backend.app import (OPENROUTER_API_BASE, OPENROUTER_API_KEY, DEFAULT_LLM_MODEL, DEFAULT_LLM_PROVIDER, PROJECT_NAME)
 from backend.app.services.vstore_svc import VectorStoreService
 from langchain_core.documents import Document as LangchainDocument 
 
@@ -32,23 +33,23 @@ class RAGService:
 
 
     def _call_llm(self, prompt: str, temperature: float = 0.1, max_tokens: int = 3500) -> Optional[str]:
-        if not settings.OPENROUTER_API_KEY:
+        if not OPENROUTER_API_KEY:
             print("OpenRouter API key not configured. Cannot call LLM.")
             return None
         headers = {
-            "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
-            "HTTP-Referer": settings.PROJECT_NAME, "X-Title": settings.PROJECT_NAME
+            "HTTP-Referer": PROJECT_NAME, "X-Title": PROJECT_NAME
         }
         payload = {
-            "model": settings.DEFAULT_LLM_MODEL,
+            "model": DEFAULT_LLM_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature, "max_tokens": max_tokens
         }
-        print(f"\n--- Calling LLM ({settings.DEFAULT_LLM_MODEL}) ---")
+        print(f"\n--- Calling LLM ({DEFAULT_LLM_MODEL}) ---")
         try:
             response = requests.post(
-                f"{settings.OPENROUTER_API_BASE}/chat/completions",
+                f"{OPENROUTER_API_BASE}/chat/completions",
                 headers=headers, json=payload, timeout=180
             )
             response.raise_for_status()
@@ -428,7 +429,7 @@ if __name__ == "__main__":
 
     print("\n--- RAG Test Query 1 (Reranker & Numerical Citations - Robust Parsing) ---")
     query1 = "What is TransFusion and its significance, including any limitations? Also discuss CEAP."
-    if settings.OPENROUTER_API_KEY:
+    if OPENROUTER_API_KEY:
         response1 = rag_service.get_answer_and_themes(
             query1, 
             n_final_docs_for_llm=5, 

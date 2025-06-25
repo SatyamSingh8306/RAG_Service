@@ -8,7 +8,8 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document as LangchainDocument
 import os
 
-from backend.app.core.config import settings
+# from backend.app.core.config import settings
+from backend.app import EMBEDDING_MODEL_NAME,CHROMA_DB_PATH,CHROMA_COLLECTION_NAME
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -29,9 +30,9 @@ class VectorStoreService:
         logger.info("Initializing VectorStoreService (Latest LangChain)...")
 
         try:
-            logger.info(f"Loading HuggingFaceEmbeddings with model: {settings.EMBEDDING_MODEL_NAME}")
+            logger.info(f"Loading HuggingFaceEmbeddings with model: {EMBEDDING_MODEL_NAME}")
             self.embedding_function = HuggingFaceEmbeddings(
-                model_name=settings.EMBEDDING_MODEL_NAME,
+                model_name=EMBEDDING_MODEL_NAME,
                 model_kwargs={'device': 'cpu'}
             )
             logger.info("HuggingFaceEmbeddings loaded successfully.")
@@ -41,12 +42,12 @@ class VectorStoreService:
 
         try:
             if self.embedding_function:
-                logger.info(f"Initializing LangChain Chroma vector store at path: {settings.CHROMA_DB_PATH}")
-                logger.info(f"Using collection name: {settings.CHROMA_COLLECTION_NAME}")
+                logger.info(f"Initializing LangChain Chroma vector store at path: {CHROMA_DB_PATH}")
+                logger.info(f"Using collection name: {CHROMA_COLLECTION_NAME}")
                 self._langchain_chroma_instance = Chroma(
-                    collection_name=settings.CHROMA_COLLECTION_NAME,
+                    collection_name=CHROMA_COLLECTION_NAME,
                     embedding_function=self.embedding_function,
-                    persist_directory=settings.CHROMA_DB_PATH
+                    persist_directory=CHROMA_DB_PATH
                 )
                 logger.info("LangChain Chroma vector store initialized successfully.")
             else:
@@ -58,9 +59,9 @@ class VectorStoreService:
 
         # Initialize ChromaDB client with configuration from settings
         try:
-            logger.info(f"Initializing ChromaDB client at path: {settings.CHROMA_DB_PATH}")
-            os.makedirs(settings.CHROMA_DB_PATH, exist_ok=True)
-            self.client = chromadb.PersistentClient(path=settings.CHROMA_DB_PATH)
+            logger.info(f"Initializing ChromaDB client at path: {CHROMA_DB_PATH}")
+            os.makedirs(CHROMA_DB_PATH, exist_ok=True)
+            self.client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
             self._ensure_default_collection()
             logger.info("ChromaDB client initialized successfully.")
         except Exception as e:
@@ -155,14 +156,14 @@ class VectorStoreService:
 
         try:
             # Use the specified collection or default to the configured one
-            collection = collection_name or settings.CHROMA_COLLECTION_NAME
+            collection = collection_name or CHROMA_COLLECTION_NAME
             print(f"Adding {len(documents_to_add)} chunks to collection '{collection}'...")
             
             # Create a new Chroma instance for the specified collection
             chroma_instance = Chroma(
                 collection_name=collection,
                 embedding_function=self.embedding_function,
-                persist_directory=settings.CHROMA_DB_PATH
+                persist_directory=CHROMA_DB_PATH
             )
             
             added_ids = chroma_instance.add_documents(
@@ -192,7 +193,7 @@ class VectorStoreService:
             chroma_instance = Chroma(
                 collection_name=collection_name,
                 embedding_function=self.embedding_function,
-                persist_directory=settings.CHROMA_DB_PATH
+                persist_directory=CHROMA_DB_PATH
             )
             
             # Debug: Check if collection exists and has documents
