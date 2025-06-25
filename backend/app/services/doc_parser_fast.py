@@ -8,9 +8,10 @@ from pathlib import Path
 # Imports for semantic chunking
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.document_loaders import CSVLoader, Docx2txtLoader, WebBaseLoader
+from langchain_community.document_loaders import CSVLoader, Docx2txtLoader, WebBaseLoader, OnlinePDFLoader
 from pptx import Presentation
 from pptx.shapes.graphfrm import GraphicFrame
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 import pandas as pd
 import json
 import zipfile
@@ -18,10 +19,15 @@ import xml.etree.ElementTree as ET
 from docx import Document
 import requests
 import re
+import base64
+from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 
 # Local application imports
-from backend.app.core.config import settings
+# from backend.app.core.config import settings  #NO NEED 
+from backend.app import OLLAMA_MODEL, OLLAMA_BASE_URL, GROQ_API_KEY, GROQ_MODEL,EMBEDDING_MODEL_NAME
 from backend.app.services.vstore_svc import VectorStoreService
+from backend.app.services.system_message import QUERY
 
 class DocParserFastService:
     """
@@ -70,6 +76,68 @@ class DocParserFastService:
         if len(words) <= 8 and sum(1 for w in words if w.isupper()) >= len(words) * 0.6:
             return True
         return False
+    
+    def _exatract_text_from_vlm(self, encoded_image, query:str=QUERY)->str:
+        """
+        Extracting the image data using VLM(vision Language Model)
+        RETURN the description of image data in string format
+        """
+        prompt = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text", 
+                        "text": query
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{encoded_image}",
+                        },
+                    },
+                ],
+            }
+        ]
+
+        """--------------- Groq VLM -----------------"""
+        # _llm = ChatGroq(
+        #     model = GROQ_MODEL,
+        #     api_key=GROQ_API_KEY
+        # )
+        
+        """-------------OLLAMA VLM ------------------"""
+        _llm = ChatOllama(
+            model = OLLAMA_MODEL,
+            base_url = OLLAMA_BASE_URL
+            #"https://nhg02zxgif78dz-11434.proxy.runpod.net/"
+            #"https://2d89-2a01-4f9-c013-bc97-00-1.ngrok-free.app"
+            # api_key= settings.GROQ_API_KEY
+        )
+        result = _llm.invoke(prompt)
+        return result.content
+    
+    def _exatract_sections_from_onlinepdf(self, url:str)-> List[Dict[str,Any]]:
+        sections =[]
+        try:
+            loader = OnlinePDFLoader([url])
+            documents = loader.load()
+
+            section_counter = 0
+            for index,doc in enumerate(documents):
+                current_section = {
+                    "title": f"page_{index+1}", 
+                    "page_number": index+1, 
+                    "paragraphs": [doc.page_content]
+                }
+                if current_section["paragraphs"]:
+                    # ensure section_index for untitled sections
+                    if "section_index" not in current_section:
+                        section_counter += 1
+                        current_section["section_index"] = section_counter
+                    sections.append(current_section)
+        except Exception as e:
+            print("Unable to load the pdf via {url} check if this is valid")
 
     def _extract_sections_from_pdf(self, file_path: str) -> List[Dict[str, Any]]:
         """
@@ -97,6 +165,31 @@ class DocParserFastService:
                     current_section = {"title": text, "page_number": page_index+1, "paragraphs": [], "section_index": section_counter}
                 else:
                     current_section["paragraphs"].append(text)
+            page = doc.load_page(page_index)
+            pix = page.get_pixmap(dpi=200)  # higher dpi for better quality
+            img_bytes = pix.tobytes("png")
+            img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+            content = self._exatract_text_from_vlm(encoded_image=img_base64)
+            current_section["paragraphs"].append(content)
+
+            images = page.get_images(full=True)
+            for index, img in enumerate(images):
+                xref = img[0]
+                pix = fitz.Pixmap(doc, xref)
+                if pix.n > 4:
+                    pix = fitz.Pixmap(fitz.csRGB, pix)
+
+                img_bytes = pix.tobytes("png")
+                img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+                content = self._exatract_text_from_vlm(encoded_image=img_base64)
+                current_section = {
+                    "title": f"fig{index+1}", 
+                    "page_number": page_index+1, 
+                    "paragraphs": [content], 
+                    "section_index": section_counter
+                    }
+                sections.append(current_section)
+
             if current_section["paragraphs"]:
                 # ensure section_index for untitled sections
                 if "section_index" not in current_section:
@@ -152,6 +245,12 @@ class DocParserFastService:
                                 f"categories {categories}, values {values}."
                             )
                             current_section["paragraphs"].append(chart_text)
+                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    img = shape.image
+                    img_bytes = img.blob
+                    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+                    content = self._exatract_text_from_vlm(encoded_image= img_base64)
+                    current_section["paragraphs"].append(content)
 
             if current_section["paragraphs"]:
                 if "section_index" not in current_section:
@@ -577,9 +676,13 @@ class DocParserFastService:
             # Check if the URL is a Google Doc and route accordingly
             if "docs.google.com/document/" in url:
                 print(f"Detected Google Doc URL: {url}")
-                sections = self._extract_text_from_gdoc_url(url)
+                sections = self._extract_text_from_gdoc_url(url=url)
             elif "docs.google.com/spredsheet/" in url:
-                sections = self._extract_text_from_gsheet_url(url)
+                print(f"Detected Google Sheet URL: {url}")
+                sections = self._extract_text_from_gsheet_url(url=url)
+            elif "pdf" in url:
+                print(f"Detected the pdf URL: {url}")
+                sections = self._exatract_sections_from_onlinepdf(url=url)
             else:
                 print(f"Detected standard web URL: {url}")
                 sections = self._extract_text_from_html(url)
