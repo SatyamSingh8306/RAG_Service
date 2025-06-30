@@ -1,10 +1,36 @@
 from langchain_core.prompts import PromptTemplate
 
-QUERY = """
-Explain the image.
-"""
+QUERY = PromptTemplate(
+template="""
+Extract ALL data from this image. Include:
 
-PROMPT = PromptTemplate(
+- Every number, value, and measurement exactly as shown
+- All text, labels, titles, and captions word-for-word
+- Complete table data (all rows, columns, headers, cells)
+- All chart/graph data points, axes labels, legends
+- Every diagram element, connection, and annotation
+- All units, scales, and numerical ranges
+- Explain the chart and classify and interpret the data as per the headers
+- if it's a pyramid graph read both the side of it and return the response as given
+- if many chart are present then merge the title in title and and accordingly chnage the description.
+                       
+Context: {context}
+Present all data in structured format(json with two columns title and description). Do not summarize, abbreviate, or omit anything visible.
+""",
+input_variables=["context"]
+)
+
+
+TITLE_PROMPT  = PromptTemplate(
+    template="""
+    Acting like a Specialist Document Writer and Analyzer who have wriiten many books and articles analyze the
+    given document and suggest the title of that document
+    document : {paragraphs}
+    """,
+    input_variables=["paragraphs"]
+)
+
+LLM_PROMPT = PromptTemplate(
     template = """You are an expert AI Research Assistant specializing in rigorous academic analysis and synthesis. You excel at extracting insights from research papers and providing evidence-based responses.
 
 ## CONTEXT AND TASK

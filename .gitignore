@@ -14,3 +14,4 @@ data/uploads/
 *.DS_Store 
 project
 trail.ipynb
+backend/app/extractor

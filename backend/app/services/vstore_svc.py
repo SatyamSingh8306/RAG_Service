@@ -1,6 +1,8 @@
 import uuid
 from typing import List, Dict, Any, Optional, Tuple
 import logging
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 
 import chromadb
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -126,6 +128,14 @@ class VectorStoreService:
     def get_collection(self, name: str = "default"):
         """Get a collection by name."""
         return self.client.get_collection(name)
+    
+    def _should_chunk(self, document1 : LangchainDocument, document2 : LangchainDocument, threshold: int= 0.95)->bool:
+        embedding1 = self.embedding_function.embed_documents([document1.page_content])
+        embedding2 = self.embedding_function.embed_documents([document2.page_content])
+
+        similarities = cosine_similarity(embedding1, embedding2)
+        max_sim = np.max(similarities)
+        return max_sim < threshold
 
     def add_documents(self, chunks: List[str], metadatas: List[Dict[str, Any]], doc_ids: Optional[List[str]] = None, collection_name: Optional[str] = None) -> bool:
         """Add documents to the vector store."""
@@ -165,11 +175,37 @@ class VectorStoreService:
                 embedding_function=self.embedding_function,
                 persist_directory=CHROMA_DB_PATH
             )
-            
-            added_ids = chroma_instance.add_documents(
-                documents=documents_to_add,
-                ids=doc_ids
-            )
+
+            final_documents = []
+            final_ids = []
+
+            for doc, doc_id in zip(documents_to_add, doc_ids):
+                retrieved = self.query_documents_with_scores(
+                    query_text=doc.page_content,
+                    n_results=5,
+                    collection_name=collection_name
+                )
+
+                should_add = True
+                if retrieved:
+                    for existing_doc, _ in retrieved:
+                        if not isinstance(existing_doc, LangchainDocument):
+                            print("WARNING: Invalid document found in retrieval result:", type(existing_doc))
+                            continue
+                        if not self._should_chunk(doc, existing_doc, threshold=0.95):
+                            print(f"❌ Skipped chunk (too similar): {doc_id}")
+                            should_add = False
+                            break
+
+                if should_add:
+                    final_documents.append(doc)
+                    final_ids.append(doc_id)
+            added_ids = []
+            if final_documents:
+                added_ids = chroma_instance.add_documents(
+                    documents=final_documents,
+                    ids=final_ids
+                )
             print(f"Successfully stored {len(added_ids)} chunks in collection '{collection}'.\n{'='*60}")
             return True
         except Exception as e:
