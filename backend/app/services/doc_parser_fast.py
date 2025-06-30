@@ -60,13 +60,7 @@ class DocParserFastService:
                 model_kwargs={'device': 'cpu'},
                 encode_kwargs={"normalize_embeddings": True}
             )
-            # self.semantic_splitter = RecursiveCharacterTextSplitter(
-            #     chunk_size=800,
-            #     chunk_overlap=200,
-            #     length_function=len,
-            #     is_separator_regex=False,
-            #     separators=["\n\n", "\n", ". ", "? ", "! ", ",", " ", ""]
-            # )
+            
             self.semantic_splitter = SemanticChunker(
                     self.embeddings,
                     breakpoint_threshold_type="percentile",  # or "standard_deviation"
@@ -77,7 +71,13 @@ class DocParserFastService:
         except Exception as e:
             logger.error(f"Error initializing embedding model: {e}. Chunking may be suboptimal.")
             self.embeddings = None
-            self.semantic_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            self.semantic_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=800,
+                chunk_overlap=200,
+                length_function=len,
+                is_separator_regex=False,
+                separators=["\n\n", "\n", ". ", "? ", "! ", ",", " ", ""]
+            )
 
     def _initialize_models(self):
         """Initializes LLM and VLM models to be reused across the service."""
