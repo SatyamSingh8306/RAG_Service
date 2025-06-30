@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 
 # Imports for semantic chunking
+from langchain_experimental.text_splitter import SemanticChunker
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import CSVLoader, Docx2txtLoader, WebBaseLoader, OnlinePDFLoader
@@ -22,50 +23,145 @@ import re
 import base64
 from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
+from io import BytesIO
+
+import logging
 
 # Local application imports
 # from backend.app.core.config import settings  #NO NEED 
-from backend.app import OLLAMA_MODEL, OLLAMA_BASE_URL, GROQ_API_KEY, GROQ_MODEL,EMBEDDING_MODEL_NAME
+from backend.app import OLLAMA_MODEL, OLLAMA_BASE_URL, GROQ_API_KEY, GROQ_MODEL,EMBEDDING_MODEL_NAME, OLLAMA_CHAT_MODEL
 from backend.app.services.vstore_svc import VectorStoreService
-from backend.app.services.system_message import QUERY
+from backend.app.services.system_message import QUERY,TITLE_PROMPT
+from backend.app.types.response_format import TitleResponse,VLMResponse
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 
 class DocParserFastService:
     """
     Service to parse documents (PDFs, images), extract text,
-    perform STRUCTURE-AWARE semantic chunking, and add chunks to the vector store.
+    perform structure-aware semantic chunking, and add chunks to the vector store.
+    
+    Refactored for performance, correctness, and robustness.
     """
     def __init__(self, vector_store_service: VectorStoreService):
         self.vector_store_service = vector_store_service
-        self.ocr_processor = None  # Will be initialized on first use
+        
+        # --- PERFORMANCE: Initialize models only ONCE ---
+        self.text_llm = None
+        self.vlm = None
+        self._initialize_models()
 
-        # Use Instructor embeddings model for more citation-aware and instruction-aligned chunks
-        # light_model = sentence-transformers/all-MiniLM-L6-v2
-        # powerful and free model = hkunlp/instructor-xl
+        # Initialize embeddings and splitter
         try:
             self.embeddings = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",  # Free and powerful model from HuggingFace
+                model_name=EMBEDDING_MODEL_NAME,
                 model_kwargs={'device': 'cpu'},
                 encode_kwargs={"normalize_embeddings": True}
             )
-
-            # NOTE: Using semantic chunking with INSTRUCTOR may require a custom splitter; fallback used here
-            self.semantic_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=800,  # smaller for citation-aware precision
-                chunk_overlap=200,
-                length_function=len,
-                is_separator_regex=False,
-                separators=["\n\n", "\n", ". ", "? ", "! ", ",", " ", ""]
+            # self.semantic_splitter = RecursiveCharacterTextSplitter(
+            #     chunk_size=800,
+            #     chunk_overlap=200,
+            #     length_function=len,
+            #     is_separator_regex=False,
+            #     separators=["\n\n", "\n", ". ", "? ", "! ", ",", " ", ""]
+            # )
+            self.semantic_splitter = SemanticChunker(
+                    self.embeddings,
+                    breakpoint_threshold_type="percentile",  # or "standard_deviation"
+                    breakpoint_threshold_amount=95,          # controls sensitivity
+                    min_chunk_size=1000,                      # in characters
             )
+            logger.info(f"Successfully initialized embedding model: {EMBEDDING_MODEL_NAME} and Semantic Chunker")
         except Exception as e:
-            print(f"Error initializing embedding model: {e}. Using fallback splitter.")
+            logger.error(f"Error initializing embedding model: {e}. Chunking may be suboptimal.")
             self.embeddings = None
-            self.semantic_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200,
-                length_function=len,
-                is_separator_regex=False,
-                separators=["\n\n", "\n", ". ", "? ", "! ", ",", " ", ""]
-            )
+            self.semantic_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+
+    def _initialize_models(self):
+        """Initializes LLM and VLM models to be reused across the service."""
+        try:
+            # For titles and other text tasks
+            self.text_llm = ChatOllama(model=OLLAMA_CHAT_MODEL, base_url=OLLAMA_BASE_URL)
+            self.title_chain = TITLE_PROMPT | self.text_llm.with_structured_output(TitleResponse)
+
+            # For Vision-Language Model tasks (e.g., image analysis)
+            self.vlm = ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL)
+            self.vlm_structured = self.vlm.with_structured_output(VLMResponse)
+            logger.info("LLM and VLM models initialized successfully.")
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM/VLM models: {e}")
+
+    def _get_title_from_llm(self, paragraphs: str) -> Optional[TitleResponse]:
+        if not self.title_chain:
+            logger.error("Title generation chain not initialized.")
+            return None
+        try:
+            result = self.title_chain.invoke({"paragraphs": paragraphs})
+            return result.title
+        except Exception as e:
+            logger.error(f"Error getting title from LLM: {e}")
+            return None
+
+    def _extract_text_from_vlm(self, encoded_image):
+        if not self.vlm_structured:
+            logger.error("VLM model not initialized.")
+            return None
+        try:
+            # Decode and convert to PIL image
+            decoded_bytes = base64.b64decode(encoded_image.encode("utf-8"))
+            img = Image.open(BytesIO(decoded_bytes))
+
+            # OCR
+            text_from_ocr = pytesseract.image_to_string(img)
+
+            # Generate query using OCR text
+            generated_query = QUERY.invoke({"context": text_from_ocr})
+
+            # Build prompt
+            prompt = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": generated_query
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{encoded_image}",
+                            },
+                        },
+                    ],
+                }
+            ]
+
+            # Call VLM
+            content = self.vlm_structured.invoke(prompt)
+            logging.info("VLM extracted data successfully.")
+            logging.info(f"VLM Data:\n{content}")
+            return content
+
+        except Exception as e:
+            # Fallback OCR only
+            try:
+                fallback_img = Image.open(BytesIO(base64.b64decode(encoded_image.encode("utf-8"))))
+                text_from_ocr = pytesseract.image_to_string(fallback_img)
+            except Exception as inner_e:
+                logger.error(f"Error decoding image in fallback: {inner_e}")
+                return {"title": "Error", "description": "Failed to decode image."}
+
+            title = self._get_title_from_llm(text_from_ocr)
+            logger.error(f"Error extracting text with VLM: {e}")
+            logging.info("Fallback: using Tesseract OCR only.")
+
+            return {
+                "title": title,  # typo fixed
+                "description": f"{title}:\n{text_from_ocr}"
+            }
+
 
     def _is_heading(self, text: str) -> bool:
         """
@@ -76,187 +172,209 @@ class DocParserFastService:
         if len(words) <= 8 and sum(1 for w in words if w.isupper()) >= len(words) * 0.6:
             return True
         return False
+
+    # def _extract_sections_from_pdf(self, file_path: str) -> List[Dict[str, Any]]:
+    #     """
+    #     Extracts structured sections from a PDF using text and image understanding.
+    #     Heuristics:
+    #     - Uses _is_heading() to detect section titles.
+    #     - If both image and text are present, render the entire page as an image and analyze it using VLM.
+    #     - If only text, use text+LLM title.
+    #     - If only image(s), use individual image analysis via VLM.
+    #     - Avoids duplicate sections.
+    #     """
+    #     sections = []
+    #     doc = fitz.open(file_path)
+    #     section_counter = 0
+    #     seen_contents = set()
+
+    #     for page_index in range(len(doc)):
+    #         page = doc.load_page(page_index)
+    #         blocks = page.get_text("blocks", sort=True)
+
+    #         # Step 1: Parse text blocks and headings
+    #         text_paragraphs = []
+    #         heading_text = None
+    #         for block in blocks:
+    #             if block[6] != 0:
+    #                 continue
+    #             text = block[4].replace('\r', ' ').replace('\n', ' ').strip()
+    #             if not text:
+    #                 continue
+    #             if self._is_heading(text) and not heading_text:
+    #                 heading_text = text
+    #             else:
+    #                 text_paragraphs.append(text)
+
+    #         has_text = bool(text_paragraphs)
+    #         has_heading = heading_text is not None
+    #         images = page.get_images(full=True)
+    #         has_images = bool(images)
+
+    #         def add_section(title: str, paragraphs: list):
+    #             nonlocal section_counter
+    #             content_key = title + " " + " ".join(paragraphs)
+    #             if content_key not in seen_contents and paragraphs:
+    #                 section_counter += 1
+    #                 sections.append({
+    #                     "title": title,
+    #                     "page_number": page_index + 1,
+    #                     "paragraphs": paragraphs,
+    #                     "section_index": section_counter
+    #                 })
+    #                 seen_contents.add(content_key)
+
+    #         # CASE 1: Chart-style full-page rendering (text + images present)
+    #         if has_text and has_images:
+    #             pix = page.get_pixmap(dpi=200)
+    #             img_bytes = pix.tobytes("png")
+    #             img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+    #             content = self._extract_text_from_vlm(encoded_image=img_base64)
+    #             if content:
+    #                 add_section(content.title or "Chart Section", [content.description])
+
+    #         # CASE 2: Text-only pages
+    #         elif has_text:
+    #             title = heading_text or ""
+    #             if not title:
+    #                 llm_response = self._get_title_from_llm(" ".join(text_paragraphs))
+    #                 title = llm_response.title if llm_response else "Text Section"
+    #             add_section(title, text_paragraphs)
+
+    #         # CASE 3: Image-only pages — handle each image separately
+    #         elif has_images:
+    #             for img_info in images:
+    #                 xref = img_info[0]
+    #                 pix = fitz.Pixmap(doc, xref)
+    #                 if pix.n > 4:
+    #                     pix = fitz.Pixmap(fitz.csRGB, pix)
+    #                 img_bytes = pix.tobytes("png")
+    #                 img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+
+    #                 content = self._extract_text_from_vlm(encoded_image=img_base64)
+    #                 if content:
+    #                     add_section(content.title or "Image Section", [content.description])
+
+    #     doc.close()
+    #     logger.info("Text is extracted from PDF sucessfully.....")
+    #     return sections
     
-    def _exatract_text_from_vlm(self, encoded_image, query:str=QUERY)->str:
-        """
-        Extracting the image data using VLM(vision Language Model)
-        RETURN the description of image data in string format
-        """
-        prompt = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text", 
-                        "text": query
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{encoded_image}",
-                        },
-                    },
-                ],
-            }
-        ]
-
-        """--------------- Groq VLM -----------------"""
-        # _llm = ChatGroq(
-        #     model = GROQ_MODEL,
-        #     api_key=GROQ_API_KEY
-        # )
-        
-        """-------------OLLAMA VLM ------------------"""
-        _llm = ChatOllama(
-            model = OLLAMA_MODEL,
-            base_url = OLLAMA_BASE_URL
-            #"https://nhg02zxgif78dz-11434.proxy.runpod.net/"
-            #"https://2d89-2a01-4f9-c013-bc97-00-1.ngrok-free.app"
-            # api_key= settings.GROQ_API_KEY
-        )
-        result = _llm.invoke(prompt)
-        return result.content
-    
-    def _exatract_sections_from_onlinepdf(self, url:str)-> List[Dict[str,Any]]:
-        sections =[]
-        try:
-            loader = OnlinePDFLoader([url])
-            documents = loader.load()
-
-            section_counter = 0
-            for index,doc in enumerate(documents):
-                current_section = {
-                    "title": f"page_{index+1}", 
-                    "page_number": index+1, 
-                    "paragraphs": [doc.page_content]
-                }
-                if current_section["paragraphs"]:
-                    # ensure section_index for untitled sections
-                    if "section_index" not in current_section:
-                        section_counter += 1
-                        current_section["section_index"] = section_counter
-                    sections.append(current_section)
-        except Exception as e:
-            print("Unable to load the pdf via {url} check if this is valid")
-
     def _extract_sections_from_pdf(self, file_path: str) -> List[Dict[str, Any]]:
         """
-        Extracts text from PDF and groups paragraphs into sections by detecting headings.
-        Returns list of sections with 'title', 'page_number', and 'paragraphs'.
+        Extracts structured sections from a PDF by rendering each page as an image and analyzing it using VLM.
+        Ignores text blocks entirely and uses Vision-Language Model (VLM) on full-page image.
         """
         sections = []
         doc = fitz.open(file_path)
         section_counter = 0
+        seen_contents = set()
+
         for page_index in range(len(doc)):
             page = doc.load_page(page_index)
-            blocks = page.get_text("blocks", sort=True)
-            current_section = {"title": f"page_{page_index+1}_untitled", "page_number": page_index+1, "paragraphs": []}
-            for block in blocks:
-                if block[6] != 0:
-                    continue
-                text = block[4].replace('\r', ' ').replace('\n', ' ').strip()
-                if not text:
-                    continue
-                if self._is_heading(text):
-                    # start new section
-                    if current_section["paragraphs"]:
-                        sections.append(current_section)
-                    section_counter += 1
-                    current_section = {"title": text, "page_number": page_index+1, "paragraphs": [], "section_index": section_counter}
-                else:
-                    current_section["paragraphs"].append(text)
-            page = doc.load_page(page_index)
-            pix = page.get_pixmap(dpi=200)  # higher dpi for better quality
+
+            # Render full page as image
+            pix = page.get_pixmap(dpi=200) 
             img_bytes = pix.tobytes("png")
             img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-            content = self._exatract_text_from_vlm(encoded_image=img_base64)
-            current_section["paragraphs"].append(content)
 
-            images = page.get_images(full=True)
-            for index, img in enumerate(images):
-                xref = img[0]
-                pix = fitz.Pixmap(doc, xref)
-                if pix.n > 4:
-                    pix = fitz.Pixmap(fitz.csRGB, pix)
+            # Extract text using Vision-Language Model
+            content = self._extract_text_from_vlm(encoded_image=img_base64)
 
-                img_bytes = pix.tobytes("png")
-                img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-                content = self._exatract_text_from_vlm(encoded_image=img_base64)
-                current_section = {
-                    "title": f"fig{index+1}", 
-                    "page_number": page_index+1, 
-                    "paragraphs": [content], 
-                    "section_index": section_counter
-                    }
-                sections.append(current_section)
-
-            if current_section["paragraphs"]:
-                # ensure section_index for untitled sections
-                if "section_index" not in current_section:
+            def add_section(title: str, paragraphs: list):
+                nonlocal section_counter
+                content_key = title + " " + " ".join(paragraphs)
+                if content_key not in seen_contents and paragraphs:
                     section_counter += 1
-                    current_section["section_index"] = section_counter
-                sections.append(current_section)
+                    sections.append({
+                        "title": title,
+                        "page_number": page_index + 1,
+                        "paragraphs": paragraphs,
+                        "section_index": section_counter
+                    })
+                    seen_contents.add(content_key)
+
+            if content:
+                title = content.title
+                description = content.description.strip()
+                if description:
+                    add_section(title, [description])
+                else:
+                    logger.warning(f"Empty description from VLM on page {page_index + 1}")
+            else:
+                logger.warning(f"VLM failed to extract content from page {page_index + 1}")
+
         doc.close()
+        logger.info("Text is extracted from PDF via VLM rendering successfully.")
         return sections
 
     def _extract_text_from_pptx(self, file_path: str) -> List[Dict[str, Any]]:
         """
-        Extracts text from PPTX and groups paragraphs into sections by detecting headings.
-        Returns list of sections with 'title', 'page_number', and 'paragraphs'.
+        Extracts all content from each PPTX slide as one section:
+        - Uses _is_heading to set section title.
+        - Combines text, chart summaries, and image descriptions into one 'paragraphs' list.
         """
         prs = Presentation(file_path)
         sections = []
         section_counter = 0
 
         for i, slide in enumerate(prs.slides):
-            current_section = {
-                "title": f"slide_{i+1}_untitled",
-                "page_number": i + 1,
-                "paragraphs": []
-            }
+            section_counter += 1
+            paragraphs = []
 
+            section_title = f"slide_{i+1}"
             for shape in slide.shapes:
+                # 1. Text content
                 if hasattr(shape, "text"):
                     text = shape.text.strip().replace('\r', ' ').replace('\n', ' ')
                     if not text:
                         continue
-                    if self._is_heading(text):
-                        # Start new section
-                        if current_section["paragraphs"]:
-                            sections.append(current_section)
-                        section_counter += 1
-                        current_section = {
-                            "title": text,
-                            "page_number": i + 1,
-                            "paragraphs": [],
-                            "section_index": section_counter
-                        }
+                    if self._is_heading(text) and section_title.startswith("slide_"):
+                        section_title = text  # First heading becomes title
                     else:
-                        current_section["paragraphs"].append(text)
+                        paragraphs.append(text)
 
+                # 2. Chart content
                 elif isinstance(shape, GraphicFrame) and shape.has_chart:
-                    chart = shape.chart  # safe to access now
-                    for plot in chart.plots:
-                        categories = [c.label for c in plot.categories]
-                        for series in plot.series:
-                            values = tuple(series.values)
-                            chart_text = (
-                                f"Chart ({chart.chart_type}): Series '{series.name}', "
-                                f"categories {categories}, values {values}."
-                            )
-                            current_section["paragraphs"].append(chart_text)
-                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                    img = shape.image
-                    img_bytes = img.blob
-                    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-                    content = self._exatract_text_from_vlm(encoded_image= img_base64)
-                    current_section["paragraphs"].append(content)
+                    chart = shape.chart
+                    for series in chart.series:
+                        values = [v for v in series.values]
+                        chart_text = (
+                            f"Chart: Series '{series.name}', values: {values}"
+                        )
+                        paragraphs.append(chart_text)
 
-            if current_section["paragraphs"]:
-                if "section_index" not in current_section:
-                    section_counter += 1
-                    current_section["section_index"] = section_counter
-                sections.append(current_section)
+                # 3. Image content (VLM-based)
+                elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    try:
+                        img = shape.image
+                        img_bytes = img.blob
+                        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+                        content = self._extract_text_from_vlm(encoded_image=img_base64)
+                        if content:
+                            paragraphs.append(f"Image Insight: {content.description}")
+                            # Optionally override title if VLM title is better
+                            if len(content.title or "") > len(section_title):
+                                section_title = content.title
+                            
+                    except Exception as e:
+                        print(f"unable to process the document---Error : {e}")
+                        continue
+
+            if paragraphs:
+                try:
+                    llm_title = self._get_title_from_llm("\n\n".join(paragraphs))
+                    if llm_title and len(llm_title.strip()) > 0:
+                        section_title = llm_title
+                except Exception as e:
+                    print(f"Error getting title from LLM for slide {i + 1}: {e}")
+                    # Keep the existing section_title
+                
+                sections.append({
+                    "title": section_title,
+                    "page_number": i + 1,
+                    "paragraphs": paragraphs,
+                    "section_index": section_counter
+                })
 
         return sections
 
@@ -275,10 +393,11 @@ class DocParserFastService:
 
         for i, doc in enumerate(documents):
             text = doc.page_content.strip()
+            title = self._get_title_from_llm("CSV DATA : "+ text)
             if not text:
                 continue
             current_section = {
-                "title": f"page_{i+1}_untitled",
+                "title": title,
                 "page_number": i + 1,
                 "paragraphs": [text]
             }
@@ -340,26 +459,6 @@ class DocParserFastService:
                 "section_index": section_counter
             })
 
-        # with zipfile.ZipFile(file_path, 'r') as docx:
-        #     chart_files = [f for f in docx.namelist() if f.startswith('word/charts/chart')]
-        #     for chart_file in chart_files:
-        #         chart_xml = docx.read(chart_file)
-        #         root = ET.fromstring(chart_xml)
-        #         namespaces = {
-        #             'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart'
-        #         }
-        #         chart_data = []
-        #         for pt in root.findall('.//c:pt', namespaces):
-        #             idx = pt.get('idx')
-        #             value = pt.find('c:v', namespaces).text
-        #             chart_data.append((idx, value))
-                
-        #         # Format chart data into a readable paragraph
-        #         chart_para = f"Chart '{chart_file}': " + ', '.join([f"Index {idx}: {value}" for idx, value in chart_data])
-                
-        #         # Append the chart data to the paragraphs of the current section
-        #         if sections:
-        #             sections[-1]["paragraphs"].append(chart_para)
         return sections
 
     def _extract_text_from_json(self, file_path: str) -> List[Dict[str, Any]]:
@@ -571,8 +670,19 @@ class DocParserFastService:
         sections = []
         try:
             img = Image.open(file_path)
+            with open(file_path, "rb") as f:
+                        img_base64 = base64.b64encode(f.read()).decode("utf-8")
+                        content = self._extract_text_from_vlm(encoded_image=img_base64)
+                        if content:
+                            sections.append({
+                                "title": content.title,
+                                "page_number": 1,
+                                "paragraphs": [content.description],
+                                "section_index": 1
+                            })
+                            return sections
+                        
             text_from_ocr = pytesseract.image_to_string(img)
-            
             if text_from_ocr.strip():
                 # Split text into paragraphs
                 paragraphs = [p.strip() for p in text_from_ocr.split('\n\n') if p.strip()]
@@ -580,12 +690,13 @@ class DocParserFastService:
                     paragraphs = [p.strip() for p in text_from_ocr.split('\n') if p.strip()]
                 
                 if paragraphs:
+                    
                     sections.append({
-                        "title": "ocr_image_section",
-                        "page_number": 1,
-                        "paragraphs": paragraphs,
-                        "section_index": 1
-                    })
+                            "title": "ocr_image_section",
+                            "page_number": 1,
+                            "paragraphs": paragraphs,
+                            "section_index": 1
+                        })
             print(f"Extracted text using OCR from image: {os.path.basename(file_path)}")
         except pytesseract.TesseractNotFoundError:
             print("TesseractNotFoundError: Tesseract is not installed or not in your PATH.")
@@ -680,9 +791,9 @@ class DocParserFastService:
             elif "docs.google.com/spredsheet/" in url:
                 print(f"Detected Google Sheet URL: {url}")
                 sections = self._extract_text_from_gsheet_url(url=url)
-            elif "pdf" in url:
-                print(f"Detected the pdf URL: {url}")
-                sections = self._exatract_sections_from_onlinepdf(url=url)
+            # elif "pdf" in url:
+            #     print(f"Detected the pdf URL: {url}")
+            #     sections = self._exatract_sections_from_onlinepdf(url=url)
             else:
                 print(f"Detected standard web URL: {url}")
                 sections = self._extract_text_from_html(url)
