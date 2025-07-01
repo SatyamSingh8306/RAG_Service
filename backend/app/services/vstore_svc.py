@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import logging
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+import json
 
 import chromadb
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -37,6 +38,7 @@ class VectorStoreService:
                 model_name=EMBEDDING_MODEL_NAME,
                 model_kwargs={'device': 'cpu'}
             )
+            self.load_access_map_from_json()
             logger.info("HuggingFaceEmbeddings loaded successfully.")
         except Exception as e:
             logger.error(f"Error loading HuggingFaceEmbeddings: {e}")
@@ -80,6 +82,13 @@ class VectorStoreService:
         except:
             self.client.create_collection("default")
 
+    def load_access_map_from_json(self, path=r"backend\app\services\acess.json"):
+        try:
+            with open(path, "r") as f:
+                self.collection_access_map = json.load(f)
+        except Exception as e:
+            self.collection_access_map = {}
+
     def create_collection(self, name: str) -> bool:
         """Create a new collection."""
         logger.info(f"Attempting to create collection: {name}")
@@ -109,6 +118,43 @@ class VectorStoreService:
                 raise ValueError(f"Collection '{name}' already exists")
             logger.error(f"Error creating collection {name}: {e}")
             raise e
+    def _get_accessible_collections(self, current_collection: str) -> List[str]:
+        return self.collection_access_map.get(current_collection, [current_collection])
+
+    def query_with_access_control(
+        self,
+        query_text: str,
+        current_collection: str,
+        n_results: int = 5
+    ) -> List[Tuple[LangchainDocument, float]]:
+        accessible_collections = self._get_accessible_collections(current_collection)
+        all_results = []
+
+        for col in accessible_collections:
+            try:
+                res = self.query_documents_with_scores(
+                    query_text=query_text,
+                    n_results=n_results,
+                    collection_name=col
+                )
+                if res:
+                    for doc, score in res:
+                        all_results.append((doc, score, col))  # track collection name
+            except Exception as e:
+                logger.warning(f"Failed to query collection '{col}': {e}")
+
+        # Optional: deduplicate by document content or ID
+        seen = set()
+        deduped_results = []
+        for doc, score, col in all_results:
+            key = doc.page_content
+            if key not in seen:
+                seen.add(key)
+                deduped_results.append((doc, score))
+
+        # Return top `n_results` sorted by score (lowest = closest)
+        sorted_results = sorted(deduped_results, key=lambda x: x[1])
+        return sorted_results[:n_results]
 
     def list_collections(self) -> List[Tuple[str, int]]:
         """List all collections with their document counts."""

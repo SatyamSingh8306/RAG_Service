@@ -12,7 +12,6 @@ Extract ALL data from this image. Include:
 - All units, scales, and numerical ranges
 - Explain the chart and classify and interpret the data as per the headers
 - if it's a pyramid graph read both the side of it and return the response as given
-- if many chart are present then merge the title in title and and accordingly chnage the description.
                        
 Context: {context}
 Present all data in structured format(json with two columns title and description). Do not summarize, abbreviate, or omit anything visible.
