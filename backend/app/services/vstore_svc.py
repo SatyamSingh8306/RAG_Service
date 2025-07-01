@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import logging
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+import json
 
 import chromadb
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -37,6 +38,8 @@ class VectorStoreService:
                 model_name=EMBEDDING_MODEL_NAME,
                 model_kwargs={'device': 'cpu'}
             )
+            self.path_db = r"backend\app\services\acess.json"
+            self.load_access_map_from_json()
             logger.info("HuggingFaceEmbeddings loaded successfully.")
         except Exception as e:
             logger.error(f"Error loading HuggingFaceEmbeddings: {e}")
@@ -80,35 +83,126 @@ class VectorStoreService:
         except:
             self.client.create_collection("default")
 
+    def load_access_map_from_json(self):
+        try:
+            with open(self.path_db, "r") as f:
+                self.collection_access_map = json.load(f)
+        except Exception as e:
+            self.collection_access_map = {}
+
+    def save_acess_map(self):
+        try:
+            with open(self.path_db, "w") as f:
+                json.dump(self.collection_access_map, f, indent=4)
+        except Exception as e:
+            logger.error(f"Unable to dump the json file due to {e}")
+
     def create_collection(self, name: str) -> bool:
-        """Create a new collection."""
+        """Create a new collection, or use it if it already exists."""
         logger.info(f"Attempting to create collection: {name}")
         try:
             # Check if collection already exists
             try:
                 logger.info(f"Checking if collection {name} already exists")
                 self.client.get_collection(name)
-                logger.warning(f"Collection {name} already exists")
-                raise ValueError(f"Collection '{name}' already exists")
+                logger.info(f"Collection {name} already exists, using it.")
+                # Ensure access map is updated
+                if name not in self.collection_access_map:
+                    self.collection_access_map[name] = name
+                    self.save_acess_map()
+                return True
             except Exception as e:
                 if "does not exists" in str(e).lower():
-                    # This is what we want - collection doesn't exist, we can create it
                     logger.info(f"Collection {name} does not exist, proceeding with creation")
                 else:
                     logger.error(f"Error checking collection existence: {e}")
                     raise e
-            
             # Create the collection
             logger.info(f"Creating collection: {name}")
             self.client.create_collection(name)
+            self.collection_access_map[name] = name
+            self.save_acess_map()
             logger.info(f"Successfully created collection: {name}")
             return True
         except Exception as e:
-            if "already exists" in str(e).lower():
-                logger.warning(f"Collection {name} already exists")
-                raise ValueError(f"Collection '{name}' already exists")
-            logger.error(f"Error creating collection {name}: {e}")
+            logger.error(f"Error creating or using collection {name}: {e}")
             raise e
+        
+    def _get_accessible_collections(self, current_collection: str) -> List[str]:
+        return self.collection_access_map.get(current_collection, [current_collection])
+
+    def query_with_access_control(
+        self,
+        query_text: str,
+        current_collection: str,
+        n_results: int = 5
+    ) -> List[Tuple[LangchainDocument, float]]:
+        accessible_collections = self._get_accessible_collections(current_collection)
+        all_results = []
+
+        for col in accessible_collections:
+            try:
+                res = self.query_documents_with_scores(
+                    query_text=query_text,
+                    n_results=n_results,
+                    collection_name=col
+                )
+                if res:
+                    for doc, score in res:
+                        all_results.append((doc, score, col))  # track collection name
+            except Exception as e:
+                logger.warning(f"Failed to query collection '{col}': {e}")
+
+        # Optional: deduplicate by document content or ID
+        seen = set()
+        deduped_results = []
+        for doc, score, col in all_results:
+            key = doc.page_content
+            if key not in seen:
+                seen.add(key)
+                deduped_results.append((doc, score))
+
+        # Return top `n_results` sorted by score (lowest = closest)
+        sorted_results = sorted(deduped_results, key=lambda x: x[1])
+        return sorted_results[:n_results]
+    
+    def _delete_with_access_control(self, user_collection: Optional[str], collection_name: Optional[str]) -> bool:
+        accesbile_collection = self.collection_access_map.get(user_collection, [user_collection])
+        if collection_name in accesbile_collection:
+            return self.delete_collection(collection_name)
+        else:
+            print("You don't have access to it")
+            return False
+
+    def list_collections_with_control(self, collection_name : Optional[str])->List[Tuple[str, int]]:
+        """List all the document that user have the acess"""
+        accesbile_collection = self.collection_access_map.get(collection_name, [collection_name])
+        collections = self.client.list_collections()
+        collection_list = [col.name for col in collections]
+        result = []
+        for collection in accesbile_collection:
+            if collection in collection_list:
+                coll = self.get_collection(collection)
+                result.append((coll.name, coll.count()))
+        return result
+
+    def _add_control_to_user(self, user_collection: Optional[str], client_collection: Optional[str], collection_name: Optional[str]) -> bool:
+        accessible_collection = self.collection_access_map.get(user_collection, [user_collection])
+        try:
+            if collection_name in accessible_collection:
+                if client_collection in self.collection_access_map:
+                    if collection_name not in self.collection_access_map[client_collection]:
+                        self.collection_access_map[client_collection].append(collection_name)
+                else:
+                    self.collection_access_map[client_collection] = [client_collection, collection_name]
+                self.save_acess_map()
+                return True
+            else:
+                print("User does not have access to this collection to grant access.")
+                return False
+        except Exception as e:
+            logger.error(f"Error in adding controls due to {e}..")
+            return False
 
     def list_collections(self) -> List[Tuple[str, int]]:
         """List all collections with their document counts."""

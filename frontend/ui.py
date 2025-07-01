@@ -17,10 +17,13 @@ CHAT_QUERY_URL = f"{BACKEND_URL}/api/v1/chat/query"
 COLLECTIONS_URL = f"{BACKEND_URL}/api/v1/collections"
 
 # --- Helper Functions ---
-def get_collections() -> List[Dict[str, Any]]:
-    """Get list of collections from the API."""
+def get_collections(user_id: Optional[str] = None, only_accessible: bool = False):
+    """Get list of collections from the API. If only_accessible is True, get only those the user has access to."""
     try:
-        response = requests.get(COLLECTIONS_URL)
+        if only_accessible and user_id:
+            response = requests.get(f"{COLLECTIONS_URL}/get-list", params={"collection_name": user_id})
+        else:
+            response = requests.get(COLLECTIONS_URL)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -160,6 +163,14 @@ def display_chat_message(role: str, content: Any):
         else: 
             st.markdown(str(content))
 
+def collection_exists(collection_name: str) -> bool:
+    """Check if a collection exists in the system (all collections, not just accessible)."""
+    try:
+        all_collections = get_collections()
+        return any(col["name"] == collection_name for col in all_collections)
+    except Exception:
+        return False
+
 def main():
     # --- Streamlit App ---
     st.set_page_config(page_title="DocBot - Document Research & Theme ID", layout="wide")
@@ -174,7 +185,8 @@ def main():
         "uploaded_file_details": [],
         "user_has_been_warned_about_processing": False,
         "processing_active_message_placeholder": None,
-        "selected_collection": None
+        "selected_collection": None,
+        "user_id": ""
     }
     for key, default_value in default_session_state.items():
         if key not in st.session_state:
@@ -184,87 +196,165 @@ def main():
     with st.sidebar:
         st.header("📚 Collection & Document Management")
         
-        # Collection Management Section
-        st.subheader("Collection Management")
-        
-        # Get existing collections
-        collections = get_collections()
-        collection_names = [col["name"] for col in collections]
-        
-        # Create new collection
-        with st.expander("Create New Collection", expanded=False):
-            new_collection_name = st.text_input("Collection Name")
-            if st.button("Create Collection", use_container_width=True):
-                if new_collection_name:
-                    if create_collection(new_collection_name):
-                        st.success(f"Collection '{new_collection_name}' created successfully!")
-                        st.rerun()
-                else:
-                    st.warning("Please enter a collection name")
-        
-        # Select collection
-        if collection_names:
-            st.session_state.selected_collection = st.selectbox(
-                "Select Collection",
-                options=collection_names,
-                index=0
-            )
-            
-            # Delete collection option
-            with st.expander("Delete Collection", expanded=False):
-                st.warning("⚠️ This action cannot be undone!")
-                confirm_delete = st.checkbox("I confirm I want to delete this collection")
-                if st.button("Delete Collection", disabled=not confirm_delete, use_container_width=True):
-                    if delete_collection(st.session_state.selected_collection):
-                        st.success(f"Collection '{st.session_state.selected_collection}' deleted successfully!")
-                        st.rerun()
-        else:
-            st.info("No collections available. Create a new collection to get started.")
-        
-        st.markdown("---")
-        
-        # Document Upload Section
-        st.subheader("Document Upload")
-        st.info("Using fast, rule-based document chunking.")
+        # User and Collection Management
+        st.subheader("User Login")
+        user_id_input = st.text_input(
+            "Enter Unique User ID to Load/Create Collection",
+            value=st.session_state.user_id,
+            key="user_id_input_key"
+        )
 
-        # URL Processing Section
-        st.subheader("Process from URL")
-        url_input = st.text_input("Enter a URL to process")
-        if st.button("Process URL", use_container_width=True):
-            if not st.session_state.selected_collection:
-                st.warning("Please select or create a collection first")
-            elif not url_input:
-                st.warning("Please enter a URL")
-            else:
-                try:
-                    with st.spinner(f"Sending URL for processing..."):
-                        response = requests.post(
-                            URL_PROCESS_URL,
-                            json={"url": url_input, "collection": st.session_state.selected_collection},
-                            timeout=60
-                        )
-                        response.raise_for_status()
-                        result = response.json()
-                        st.success(f"URL '{result.get('file_name')}' (ID: {result.get('source_doc_id')}) queued for processing.")
-                        # Add to uploaded documents log
-                        existing_names = {f['name'] for f in st.session_state.uploaded_file_details}
-                        if result['file_name'] not in existing_names:
-                            st.session_state.uploaded_file_details.append({
-                                "name": result['file_name'],
-                                "status": "Queued",
-                                "doc_id": result.get('source_doc_id')
-                            })
+        if st.button("Set User and Collection", use_container_width=True):
+            if user_id_input:
+                st.session_state.user_id = user_id_input
+                with st.spinner(f"Loading collection for '{user_id_input}'..."):
+                    collections = get_collections()
+                    collection_names = [col["name"] for col in collections]
+                    if user_id_input not in collection_names:
+                        st.info(f"User collection '{user_id_input}' not found. Creating it...")
+                        if create_collection(user_id_input):
+                            st.success(f"Collection '{user_id_input}' created and selected!")
+                            st.session_state.selected_collection = user_id_input
                             st.rerun()
+                        else:
+                            st.error(f"Failed to create collection for user '{user_id_input}'.")
+                    else:
+                        st.session_state.selected_collection = user_id_input
+                        st.success(f"Switched to collection for user '{user_id_input}'.")
+                        st.rerun()
+            else:
+                st.warning("Please enter a User ID.")
 
-                except Exception as e:
-                    st.error(f"Error processing URL: {e}")
+        if st.session_state.selected_collection:
+            st.success(f"Active Collection: `{st.session_state.selected_collection}`")
+            # Add a button to switch user
+            if st.button("Switch User/Collection", use_container_width=True):
+                # Reset relevant session state
+                reset_chat_history()
+                st.session_state.uploaded_file_details = []
+                st.session_state.processing_info_message = None 
+                st.session_state.selected_collection = None
+                st.session_state.user_id = ""
+                st.rerun()
+
+            # --- New: Delete Collection Option ---
+            with st.expander("Danger Zone: Delete Collection", expanded=False):
+                st.warning("Deleting a collection is irreversible. All documents and access will be lost.")
+                # Fetch all collections the user has access to
+                collections = get_collections(st.session_state.user_id, only_accessible=True)
+                user_collections = [col["name"] for col in collections]
+                if not user_collections:
+                    st.info("You do not have any collections you can delete.")
+                else:
+                    collection_to_delete = st.selectbox("Select a collection to delete:", user_collections, key="delete_collection_select")
+                    if st.button(f"Delete Collection '{collection_to_delete}'", type="primary", use_container_width=True, key="delete_collection_btn"):
+                        if not collection_exists(collection_to_delete):
+                            st.error(f"Collection '{collection_to_delete}' does not exist.")
+                        else:
+                            confirm = st.text_input("Type the collection name to confirm deletion:", key="delete_confirm_input")
+                            if confirm == collection_to_delete:
+                                try:
+                                    response = requests.delete(
+                                        f"{COLLECTIONS_URL}/{collection_to_delete}",
+                                        params={
+                                            "user_name": st.session_state.user_id,
+                                            "collection_name": collection_to_delete
+                                        },
+                                        timeout=30
+                                    )
+                                    if response.status_code == 200:
+                                        st.success(f"Collection '{collection_to_delete}' deleted successfully.")
+                                        if collection_to_delete == st.session_state.selected_collection:
+                                            reset_chat_history()
+                                            st.session_state.uploaded_file_details = []
+                                            st.session_state.processing_info_message = None 
+                                            st.session_state.selected_collection = None
+                                            st.session_state.user_id = ""
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Failed to delete collection: {response.text}")
+                                except Exception as e:
+                                    st.error(f"Error deleting collection: {e}")
+                            elif confirm:
+                                st.warning("Collection name does not match. Please type the exact name to confirm.")
+
+            # --- New: Grant Access Option ---
+            with st.expander("Grant Access to Another User", expanded=False):
+                st.info("You can grant another user access to one of your collections.")
+                # Fetch all collections the user has access to
+                collections = get_collections(st.session_state.user_id, only_accessible=True)
+                user_collections = [col["name"] for col in collections]
+                if not user_collections:
+                    st.info("You do not have any collections to grant access for.")
+                else:
+                    target_user = st.text_input("Enter the User ID to grant access:", key="grant_access_user_id")
+                    collection_to_grant = st.selectbox("Select a collection to grant access to:", user_collections, key="grant_access_collection_select")
+                    if st.button("Grant Access", use_container_width=True, key="grant_access_btn"):
+                        if not collection_exists(collection_to_grant):
+                            st.error(f"Collection '{collection_to_grant}' does not exist.")
+                        elif not target_user or target_user == st.session_state.user_id:
+                            st.warning("Please enter a valid User ID different from your own.")
+                        else:
+                            try:
+                                response = requests.post(
+                                    f"{COLLECTIONS_URL}/add_access",
+                                    params={
+                                        "user_collection": st.session_state.user_id,
+                                        "client_collection": target_user,
+                                        "collection_name": collection_to_grant
+                                    },
+                                    timeout=30
+                                )
+                                if response.status_code == 200:
+                                    st.success(f"Access granted to user '{target_user}' for collection '{collection_to_grant}'.")
+                                else:
+                                    st.error(f"Failed to grant access: {response.text}")
+                            except Exception as e:
+                                st.error(f"Error granting access: {e}")
+
+        else:
+            st.info("Enter a User ID and click 'Set User' to begin.")
 
         st.markdown("---")
+        
+        # Conditionally show upload options only when a collection is selected
+        if st.session_state.selected_collection:
+            # Document Upload Section
+            st.subheader("Document Upload")
+            st.info("Using fast, rule-based document chunking.")
 
-        uploaded_files = []  # Initialize the variable
-        if not st.session_state.selected_collection:
-            st.warning("Please select or create a collection first")
-        else:
+            # URL Processing Section
+            st.subheader("Process from URL")
+            url_input = st.text_input("Enter a URL to process")
+            if st.button("Process URL", use_container_width=True):
+                if not url_input:
+                    st.warning("Please enter a URL")
+                else:
+                    try:
+                        with st.spinner(f"Sending URL for processing..."):
+                            response = requests.post(
+                                URL_PROCESS_URL,
+                                json={"url": url_input, "collection": st.session_state.selected_collection},
+                                timeout=60
+                            )
+                            response.raise_for_status()
+                            result = response.json()
+                            st.success(f"URL '{result.get('file_name')}' (ID: {result.get('source_doc_id')}) queued for processing.")
+                            # Add to uploaded documents log
+                            existing_names = {f['name'] for f in st.session_state.uploaded_file_details}
+                            if result['file_name'] not in existing_names:
+                                st.session_state.uploaded_file_details.append({
+                                    "name": result['file_name'],
+                                    "status": "Queued",
+                                    "doc_id": result.get('source_doc_id')
+                                })
+                                st.rerun()
+
+                    except Exception as e:
+                        st.error(f"Error processing URL: {e}")
+
+            st.markdown("---")
+
             uploaded_files = st.file_uploader(
                 "Upload Documents (PDF, PNG, JPG, TIFF)",
                 type=["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "gif", "docx", "pptx" , "csv", "json", "xlsx", "txt"],
@@ -272,74 +362,74 @@ def main():
                 key="file_uploader" 
             )
 
-        if uploaded_files:
-            if st.button("Process Uploaded Documents", type="primary", use_container_width=True):
-                files_to_send_for_api = []
-                for uploaded_file_widget_instance in uploaded_files: 
-                    files_to_send_for_api.append(
-                        ("files", (uploaded_file_widget_instance.name, uploaded_file_widget_instance.getvalue(), uploaded_file_widget_instance.type))
-                    )
-
-                if files_to_send_for_api:
-                    if st.session_state.processing_active_message_placeholder is None:
-                            st.session_state.processing_active_message_placeholder = st.empty()
-                    
-                    with st.session_state.processing_active_message_placeholder.container():
-                        st.info(
-                            (
-                                "🚀 **Processing initiated using fast rule-based chunking!** "
-                                "Your documents are being queued. This involves text extraction and OCR (for images). "
-                                "Please monitor backend logs. You can query once processing seems complete."
-                            )
+            if uploaded_files:
+                if st.button("Process Uploaded Documents", type="primary", use_container_width=True):
+                    files_to_send_for_api = []
+                    for uploaded_file_widget_instance in uploaded_files: 
+                        files_to_send_for_api.append(
+                            ("files", (uploaded_file_widget_instance.name, uploaded_file_widget_instance.getvalue(), uploaded_file_widget_instance.type))
                         )
-                    st.session_state.user_has_been_warned_about_processing = True
 
-                    try:
-                        with st.spinner(f"Uploading & queueing {len(files_to_send_for_api)} document(s)..."):
-                            response = requests.post(
-                                DOCUMENTS_UPLOAD_URL, 
-                                files=files_to_send_for_api,
-                                    params={"collection": st.session_state.selected_collection},
-                                    timeout=60
-                            ) 
-                            response.raise_for_status() 
-                            
-                            results = response.json()
-                            current_uploads = []
-                            successful_queues = 0
-                            for res_item in results:
-                                file_name = res_item.get("file_name", "Unknown file")
-                                status = res_item.get("status", "failed")
-                                doc_id = res_item.get("source_doc_id")
-                                mode_used = res_item.get("processing_mode_used", "fast_rule_based") 
+                    if files_to_send_for_api:
+                        if st.session_state.processing_active_message_placeholder is None:
+                                st.session_state.processing_active_message_placeholder = st.empty()
+                        
+                        with st.session_state.processing_active_message_placeholder.container():
+                            st.info(
+                                (
+                                    "🚀 **Processing initiated using fast rule-based chunking!** "
+                                    "Your documents are being queued. This involves text extraction and OCR (for images). "
+                                    "Please monitor backend logs. You can query once processing seems complete."
+                                )
+                            )
+                        st.session_state.user_has_been_warned_about_processing = True
+
+                        try:
+                            with st.spinner(f"Uploading & queueing {len(files_to_send_for_api)} document(s)..."):
+                                response = requests.post(
+                                    DOCUMENTS_UPLOAD_URL, 
+                                    files=files_to_send_for_api,
+                                        params={"collection": st.session_state.selected_collection},
+                                        timeout=60
+                                ) 
+                                response.raise_for_status() 
                                 
-                                if status == "queued_for_processing":
-                                    st.success(f"'{file_name}' (ID: {doc_id}) queued for {mode_used} processing.")
-                                    current_uploads.append({"name": file_name, "status": f"Queued ({mode_used})", "doc_id": doc_id})
-                                    successful_queues +=1
-                                else:
-                                    st.error(f"Failed to queue '{file_name}': {res_item.get('message', 'Unknown error')}")
-                                    current_uploads.append({"name": file_name, "status": f"Failed: {res_item.get('message', '')[:50]}...", "doc_id": doc_id})
-                            
-                            existing_names = {f['name'] for f in st.session_state.uploaded_file_details}
-                            for up_detail in current_uploads:
-                                if up_detail['name'] not in existing_names:
-                                    st.session_state.uploaded_file_details.append(up_detail)
-                                    existing_names.add(up_detail['name'])
-                                else: 
-                                    for i, existing_f in enumerate(st.session_state.uploaded_file_details):
-                                        if existing_f['name'] == up_detail['name']:
-                                            st.session_state.uploaded_file_details[i] = up_detail
-                                            break
-                            if successful_queues == 0 and files_to_send_for_api:
-                                 if st.session_state.processing_active_message_placeholder:
-                                    st.session_state.processing_active_message_placeholder.error("⚠️ No files were successfully queued.")
-                    except Exception as e:
-                        st.error(f"Error during upload: {e}")
-                        if st.session_state.processing_active_message_placeholder:
-                            st.session_state.processing_active_message_placeholder.empty() 
-                else:
-                    st.warning("No files selected to upload.")
+                                results = response.json()
+                                current_uploads = []
+                                successful_queues = 0
+                                for res_item in results:
+                                    file_name = res_item.get("file_name", "Unknown file")
+                                    status = res_item.get("status", "failed")
+                                    doc_id = res_item.get("source_doc_id")
+                                    mode_used = res_item.get("processing_mode_used", "fast_rule_based") 
+                                    
+                                    if status == "queued_for_processing":
+                                        st.success(f"'{file_name}' (ID: {doc_id}) queued for {mode_used} processing.")
+                                        current_uploads.append({"name": file_name, "status": f"Queued ({mode_used})", "doc_id": doc_id})
+                                        successful_queues +=1
+                                    else:
+                                        st.error(f"Failed to queue '{file_name}': {res_item.get('message', 'Unknown error')}")
+                                        current_uploads.append({"name": file_name, "status": f"Failed: {res_item.get('message', '')[:50]}...", "doc_id": doc_id})
+                                
+                                existing_names = {f['name'] for f in st.session_state.uploaded_file_details}
+                                for up_detail in current_uploads:
+                                    if up_detail['name'] not in existing_names:
+                                        st.session_state.uploaded_file_details.append(up_detail)
+                                        existing_names.add(up_detail['name'])
+                                    else: 
+                                        for i, existing_f in enumerate(st.session_state.uploaded_file_details):
+                                            if existing_f['name'] == up_detail['name']:
+                                                st.session_state.uploaded_file_details[i] = up_detail
+                                                break
+                                if successful_queues == 0 and files_to_send_for_api:
+                                     if st.session_state.processing_active_message_placeholder:
+                                        st.session_state.processing_active_message_placeholder.error("⚠️ No files were successfully queued.")
+                        except Exception as e:
+                            st.error(f"Error during upload: {e}")
+                            if st.session_state.processing_active_message_placeholder:
+                                st.session_state.processing_active_message_placeholder.empty() 
+                    else:
+                        st.warning("No files selected to upload.")
         
         st.markdown("---")
         st.subheader("Uploaded Documents Log")

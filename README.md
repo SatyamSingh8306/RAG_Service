@@ -102,14 +102,12 @@ Fully aligned with professional research requirements:
 
 1. **Start the backend server**:
    ```bash
-   cd backend
-   uvicorn app.main:app --reload --port 8000
+   uvicorn backend.app.main:app --reload --port 8000
    ```
 
 2. **Start the frontend** (in a new terminal):
    ```bash
-   cd frontend
-   streamlit run ui.py
+   streamlit run .\frontend\ui.py
    ```
 
 3. **Access the application** at `http://localhost:8501`

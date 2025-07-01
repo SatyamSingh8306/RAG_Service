@@ -249,10 +249,10 @@ class RAGService:
             return default_empty_response
             
         # Retrieve documents using MMR
-        mmr_retrieved_docs_tuples = self.vector_store_service.query_documents_with_scores(
+        mmr_retrieved_docs_tuples = self.vector_store_service.query_with_access_control(
             query_text=query,
             n_results=initial_mmr_k,
-            collection_name=collection_name
+            current_collection=collection_name
         )
 
         if not mmr_retrieved_docs_tuples:

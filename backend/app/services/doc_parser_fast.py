@@ -1,5 +1,6 @@
 import fitz  # PyMuPDF
 import pytesseract
+import easyocr
 from PIL import Image
 import os
 from typing import List, Dict, Any, Optional
@@ -49,9 +50,13 @@ class DocParserFastService:
         self.vector_store_service = vector_store_service
         
         # --- PERFORMANCE: Initialize models only ONCE ---
-        self.text_llm = None
+        self.text_llm = ChatGroq(
+            model = GROQ_MODEL,
+            api_key = GROQ_API_KEY,
+        )
+        self.title_chain = TITLE_PROMPT | self.text_llm.with_structured_output(TitleResponse)
         self.vlm = None
-        self._initialize_models()
+        # self._initialize_models()
 
         # Initialize embeddings and splitter
         try:
@@ -60,13 +65,7 @@ class DocParserFastService:
                 model_kwargs={'device': 'cpu'},
                 encode_kwargs={"normalize_embeddings": True}
             )
-            # self.semantic_splitter = RecursiveCharacterTextSplitter(
-            #     chunk_size=800,
-            #     chunk_overlap=200,
-            #     length_function=len,
-            #     is_separator_regex=False,
-            #     separators=["\n\n", "\n", ". ", "? ", "! ", ",", " ", ""]
-            # )
+            
             self.semantic_splitter = SemanticChunker(
                     self.embeddings,
                     breakpoint_threshold_type="percentile",  # or "standard_deviation"
@@ -77,7 +76,13 @@ class DocParserFastService:
         except Exception as e:
             logger.error(f"Error initializing embedding model: {e}. Chunking may be suboptimal.")
             self.embeddings = None
-            self.semantic_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            self.semantic_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=800,
+                chunk_overlap=200,
+                length_function=len,
+                is_separator_regex=False,
+                separators=["\n\n", "\n", ". ", "? ", "! ", ",", " ", ""]
+            )
 
     def _initialize_models(self):
         """Initializes LLM and VLM models to be reused across the service."""
@@ -114,7 +119,9 @@ class DocParserFastService:
             img = Image.open(BytesIO(decoded_bytes))
 
             # OCR
-            text_from_ocr = pytesseract.image_to_string(img)
+            reader = easyocr.Reader(['en'], gpu=False)
+            text_from_ocr = reader.readtext(decoded_bytes, detail=0)
+            # text_from_ocr = pytesseract.image_to_string(img)
 
             # Generate query using OCR text
             generated_query = QUERY.invoke({"context": text_from_ocr})
@@ -140,15 +147,17 @@ class DocParserFastService:
 
             # Call VLM
             content = self.vlm_structured.invoke(prompt)
-            logging.info("VLM extracted data successfully.")
+            logging.info("VLM and Pytesseract OCR extracted data successfully.")
             logging.info(f"VLM Data:\n{content}")
             return content
 
         except Exception as e:
             # Fallback OCR only
+            text_from_ocr : str
             try:
-                fallback_img = Image.open(BytesIO(base64.b64decode(encoded_image.encode("utf-8"))))
-                text_from_ocr = pytesseract.image_to_string(fallback_img)
+                decoded_bytes = base64.b64decode(encoded_image.encode("utf-8"))
+                img = Image.open(BytesIO(decoded_bytes))
+                text_from_ocr = pytesseract.image_to_string(img)
             except Exception as inner_e:
                 logger.error(f"Error decoding image in fallback: {inner_e}")
                 return {"title": "Error", "description": "Failed to decode image."}

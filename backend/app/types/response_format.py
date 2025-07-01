@@ -3,7 +3,7 @@ from typing import Optional,Any,List,Union
 
 class TitleResponse(BaseModel):
     title: Optional[str] = Field(
-        default=None,
+        default="Nothing",
         description="Generate the most suitable and concise title for the given paragraph."
     )
 
