@@ -120,7 +120,8 @@ class VectorStoreService:
             # Create the collection
             logger.info(f"Creating collection: {name}")
             self.client.create_collection(name)
-            self.collection_access_map[name] = name
+            self.collection_access_map["satyam1"].append(name)
+            self.collection_access_map[name] = [name]
             self.save_acess_map()
             logger.info(f"Successfully created collection: {name}")
             return True
