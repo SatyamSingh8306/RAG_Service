@@ -50,9 +50,13 @@ class DocParserFastService:
         self.vector_store_service = vector_store_service
         
         # --- PERFORMANCE: Initialize models only ONCE ---
-        self.text_llm = None
+        self.text_llm = ChatGroq(
+            model = GROQ_MODEL,
+            api_key = GROQ_API_KEY,
+        )
+        self.title_chain = TITLE_PROMPT | self.text_llm.with_structured_output(TitleResponse)
         self.vlm = None
-        self._initialize_models()
+        # self._initialize_models()
 
         # Initialize embeddings and splitter
         try:

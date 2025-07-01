@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pydantic import BaseModel
 import logging
 
@@ -42,7 +42,7 @@ async def create_collection(
     except Exception as e:
         logger.error(f"Unexpected error while creating collection: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Failed to create collection: {str(e)}")
-
+    
 @router.get("", response_model=List[CollectionResponse])
 async def list_collections(
     vstore_svc: VectorStoreService = Depends(get_vector_store_service)
@@ -59,16 +59,53 @@ async def list_collections(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list collections: {str(e)}")
 
+@router.get("/get-list", response_model=List[CollectionResponse])
+async def list_collections(
+    collection_name: Optional[str] = None,
+    vstore_svc: VectorStoreService = Depends(get_vector_store_service)
+):
+    """List all collections."""
+    try:
+        collections = vstore_svc.list_collections_with_control(collection_name)
+        return [
+            CollectionResponse(
+                name=name,
+                document_count=count
+            ) for name, count in collections
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list collections: {str(e)}")
+
 @router.delete("/{name}")
 async def delete_collection(
-    name: str,
+    user_name: str,
+    collection_name: str,
     vstore_svc: VectorStoreService = Depends(get_vector_store_service)
 ):
     """Delete a collection."""
     try:
-        success = vstore_svc.delete_collection(name)
+        success = vstore_svc._delete_with_access_control(user_collection=user_name, collection_name=collection_name)
         if not success:
-            raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
-        return {"message": f"Collection '{name}' deleted successfully"}
+            raise HTTPException(status_code=403, detail=f"User '{user_name}' does not have access or collection not found.")
+        return {"message": f"Collection '{collection_name}' deleted successfully by User: {user_name}"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete collection: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Failed to delete collection: {str(e)}")
+
+@router.post("/add_access")
+async def add_control_acess(
+    user_collection: Optional[str],
+    client_collection: Optional[str],
+    collection_name: Optional[str],
+    vstore_svc: VectorStoreService = Depends(get_vector_store_service)
+):
+    try:
+        success = vstore_svc._add_control_to_user(user_collection=user_collection,
+                                                 client_collection=client_collection,
+                                                 collection_name=collection_name)
+        if not success:
+            raise HTTPException(status_code=403, detail=f"Unable to add the access by user {user_collection} to client_collection {client_collection} for collection {collection_name}")
+        return {
+            "message": f"Access control given successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Getting error {e}")

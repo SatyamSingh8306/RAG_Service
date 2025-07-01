@@ -17,10 +17,13 @@ CHAT_QUERY_URL = f"{BACKEND_URL}/api/v1/chat/query"
 COLLECTIONS_URL = f"{BACKEND_URL}/api/v1/collections"
 
 # --- Helper Functions ---
-def get_collections() -> List[Dict[str, Any]]:
-    """Get list of collections from the API."""
+def get_collections(user_id: Optional[str] = None, only_accessible: bool = False):
+    """Get list of collections from the API. If only_accessible is True, get only those the user has access to."""
     try:
-        response = requests.get(COLLECTIONS_URL)
+        if only_accessible and user_id:
+            response = requests.get(f"{COLLECTIONS_URL}/get-list", params={"collection_name": user_id})
+        else:
+            response = requests.get(COLLECTIONS_URL)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -160,6 +163,14 @@ def display_chat_message(role: str, content: Any):
         else: 
             st.markdown(str(content))
 
+def collection_exists(collection_name: str) -> bool:
+    """Check if a collection exists in the system (all collections, not just accessible)."""
+    try:
+        all_collections = get_collections()
+        return any(col["name"] == collection_name for col in all_collections)
+    except Exception:
+        return False
+
 def main():
     # --- Streamlit App ---
     st.set_page_config(page_title="DocBot - Document Research & Theme ID", layout="wide")
@@ -225,6 +236,82 @@ def main():
                 st.session_state.selected_collection = None
                 st.session_state.user_id = ""
                 st.rerun()
+
+            # --- New: Delete Collection Option ---
+            with st.expander("Danger Zone: Delete Collection", expanded=False):
+                st.warning("Deleting a collection is irreversible. All documents and access will be lost.")
+                # Fetch all collections the user has access to
+                collections = get_collections(st.session_state.user_id, only_accessible=True)
+                user_collections = [col["name"] for col in collections]
+                if not user_collections:
+                    st.info("You do not have any collections you can delete.")
+                else:
+                    collection_to_delete = st.selectbox("Select a collection to delete:", user_collections, key="delete_collection_select")
+                    if st.button(f"Delete Collection '{collection_to_delete}'", type="primary", use_container_width=True, key="delete_collection_btn"):
+                        if not collection_exists(collection_to_delete):
+                            st.error(f"Collection '{collection_to_delete}' does not exist.")
+                        else:
+                            confirm = st.text_input("Type the collection name to confirm deletion:", key="delete_confirm_input")
+                            if confirm == collection_to_delete:
+                                try:
+                                    response = requests.delete(
+                                        f"{COLLECTIONS_URL}/{collection_to_delete}",
+                                        params={
+                                            "user_name": st.session_state.user_id,
+                                            "collection_name": collection_to_delete
+                                        },
+                                        timeout=30
+                                    )
+                                    if response.status_code == 200:
+                                        st.success(f"Collection '{collection_to_delete}' deleted successfully.")
+                                        if collection_to_delete == st.session_state.selected_collection:
+                                            reset_chat_history()
+                                            st.session_state.uploaded_file_details = []
+                                            st.session_state.processing_info_message = None 
+                                            st.session_state.selected_collection = None
+                                            st.session_state.user_id = ""
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Failed to delete collection: {response.text}")
+                                except Exception as e:
+                                    st.error(f"Error deleting collection: {e}")
+                            elif confirm:
+                                st.warning("Collection name does not match. Please type the exact name to confirm.")
+
+            # --- New: Grant Access Option ---
+            with st.expander("Grant Access to Another User", expanded=False):
+                st.info("You can grant another user access to one of your collections.")
+                # Fetch all collections the user has access to
+                collections = get_collections(st.session_state.user_id, only_accessible=True)
+                user_collections = [col["name"] for col in collections]
+                if not user_collections:
+                    st.info("You do not have any collections to grant access for.")
+                else:
+                    target_user = st.text_input("Enter the User ID to grant access:", key="grant_access_user_id")
+                    collection_to_grant = st.selectbox("Select a collection to grant access to:", user_collections, key="grant_access_collection_select")
+                    if st.button("Grant Access", use_container_width=True, key="grant_access_btn"):
+                        if not collection_exists(collection_to_grant):
+                            st.error(f"Collection '{collection_to_grant}' does not exist.")
+                        elif not target_user or target_user == st.session_state.user_id:
+                            st.warning("Please enter a valid User ID different from your own.")
+                        else:
+                            try:
+                                response = requests.post(
+                                    f"{COLLECTIONS_URL}/add_access",
+                                    params={
+                                        "user_collection": st.session_state.user_id,
+                                        "client_collection": target_user,
+                                        "collection_name": collection_to_grant
+                                    },
+                                    timeout=30
+                                )
+                                if response.status_code == 200:
+                                    st.success(f"Access granted to user '{target_user}' for collection '{collection_to_grant}'.")
+                                else:
+                                    st.error(f"Failed to grant access: {response.text}")
+                            except Exception as e:
+                                st.error(f"Error granting access: {e}")
+
         else:
             st.info("Enter a User ID and click 'Set User' to begin.")
 
