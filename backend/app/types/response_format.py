@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional,Any,List,Union
+from typing import Optional,Any,List,Union, Annotated
 
 class TitleResponse(BaseModel):
     title: Optional[str] = Field(
@@ -17,7 +17,6 @@ class VLMResponse(BaseModel):
         description="Provide a detailed description of the image, including all visible elements. If the image contains a table, extract and include the data. Mention any visible labels, sections (like 'About'), or notable structures."
     )
 
-
 class ThemeResponse(BaseModel):
     """Schema for theme identification"""
     theme_summary: str = Field(description="Summary of the identified theme")
@@ -34,3 +33,8 @@ class RAGResponse(BaseModel):
     answer: str = Field(description="Comprehensive answer to the query with inline citations")
     identified_themes: List[ThemeResponse] = Field(description="List of identified themes")
     references: List[ReferenceResponse] = Field(description="Bibliography of references used")
+
+class SVGResponseFormat(BaseModel):
+    "Generating SVG Response Format."
+    required : bool = Field(default=False, description="check if svg can be used to represent the data or not")
+    svg : Optional[str] = Field(default="Nothing", description="The svg code to represent the data")

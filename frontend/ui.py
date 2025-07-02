@@ -160,6 +160,12 @@ def display_chat_message(role: str, content: Any):
             retrieved_ids = content.get('retrieved_context_document_ids', [])
             if retrieved_ids:
                 st.markdown(f"\n_(Debug: Context drawn from document IDs: {', '.join(retrieved_ids)})_")
+
+            # 6. Display SVG visualization if present
+            svg_code = content.get('svg')
+            if svg_code and svg_code.strip() and svg_code.lower() != "none":
+                st.markdown("**Visualization (SVG):**")
+                st.components.v1.html(svg_code, height=400, scrolling=True)
         else: 
             st.markdown(str(content))
 

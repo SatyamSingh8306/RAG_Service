@@ -19,6 +19,27 @@ Present all data in structured format(json with two columns title and descriptio
 input_variables=["context"]
 )
 
+SVG_GENERATION_PROMPT = PromptTemplate(
+    template = """
+    Acting like a Prompt Specialist create a best prompt to best represent this data in svg format with proper intruction on coloring background labels and more
+    specailly make sure that bg have white color
+    make sure to give every proper instruction required by llm to generate the svg
+    context :  {context}
+    Note: if no svg generation is reuiqred then say it clearly.
+    """,
+    input_variables=["context"]
+)
+
+SVG_PROMPT = PromptTemplate(
+    template="""Acting like a World Best Data Analytics Engineer 
+Think of the best way to represent below given data in context and Generate SVG code to represent the data in form of chart precisely with proper labeling.
+Make sure to give a proper color to each components(like background , labels and more) so that color labeling don't collide with each other 
+make sure that font size of labels looks good.
+
+Context: {context}
+""",
+input_variables=["context"]
+)
 
 TITLE_PROMPT  = PromptTemplate(
     template="""

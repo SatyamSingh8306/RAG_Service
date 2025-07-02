@@ -23,7 +23,7 @@ EMBEDDING_MODEL_NAME : str = os.environ.get("EMBEDDING_MODEL_NAME", "sentence-tr
 
 #------------------------ Text Generation Model -----------------------------
 OLLAMA_CHAT_MODEL = os.environ.get("OLLAMA_CHAT_MODEL", "llama3.2")
-use_ollama  = os.environ.get("USE_OLLAMA")
+use_ollama  = os.environ.get("USE_OLLAMA", "true")
 USE_OLLAMA : bool = True
 if use_ollama.lower()=="true":
     USE_OLLAMA = True

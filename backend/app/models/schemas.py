@@ -59,6 +59,7 @@ class RAGResponse(BaseModel):
     retrieved_context_document_ids: List[str]
     synthesized_expert_answer: Optional[str] = None
     document_details: Optional[List[DocumentDetail]] = None  # Added for document-level details
+    svg : Optional[str] = None
 
 # --- General Error Schema ---
 class ErrorDetail(BaseModel):

@@ -7,6 +7,7 @@ import logging
 
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationSummaryMemory
 from langchain.chains import ConversationChain
@@ -26,7 +27,8 @@ from backend.app import (
     OLLAMA_BASE_URL
 )
 from backend.app.services.vstore_svc import VectorStoreService
-from backend.app.types.response_format import RAGResponse
+from backend.app.types.response_format import RAGResponse, SVGResponseFormat
+from backend.app.services.system_message import SVG_PROMPT, SVG_GENERATION_PROMPT
 
 # For Cross-Encoder Reranking
 from sentence_transformers import CrossEncoder
@@ -68,8 +70,8 @@ class RAGService:
                     model=OLLAMA_CHAT_MODEL,
                     base_url=OLLAMA_BASE_URL,
                     temperature=0.1,
-                    num_predict=3500,  # Use num_predict instead of max_tokens for Ollama
                 )
+                self.svg_chain = SVG_GENERATION_PROMPT | self._llm | self._llm.with_structured_output(SVGResponseFormat)
                 logger.info(f"Initialized Ollama LLM: {OLLAMA_CHAT_MODEL}")
             else:
                 if not OPENROUTER_API_KEY:
@@ -86,7 +88,8 @@ class RAGService:
                         "X-Title": PROJECT_NAME
                     }
                 )
-                logger.info(f"Initialized OpenRouter LLM: {DEFAULT_LLM_MODEL}")
+                
+                self.svg_chain = SVG_GENERATION_PROMPT | self._llm | self._llm.with_structured_output(SVGResponseFormat)
             
             # Set up structured output for RAG responses
             self.structured_llm = self._llm.with_structured_output(RAGResponse)
@@ -170,6 +173,15 @@ class RAGService:
             logger.error(f"Error calling LLM: {e}")
             return None
 
+    def _get_svg_response(self, context)->str:
+        content = self.svg_chain.invoke({"context": context})
+        if content.required:
+            return content.svg
+        return """<!-- sample rectangle -->
+        <svg width="200" height="200" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100" height="100" x="50" y="50" fill="red" />
+        </svg>"""
+            
     def _rerank_documents(self, query: str, documents: List[LangchainDocument], top_n: int) -> List[Tuple[LangchainDocument, float]]:
         """Reranks documents using the CrossEncoder and returns top_n with scores."""
         if not self.reranker or not documents:
@@ -223,7 +235,7 @@ class RAGService:
     def get_answer_and_themes(self, 
                             query: str, 
                             collection_name: Optional[str] = None, 
-                            n_final_docs_for_llm: int = 20, 
+                            n_final_docs_for_llm: int = 5, 
                             initial_mmr_k: int = 100, 
                             initial_mmr_fetch_k: int = 200) -> Dict[str, Any]:
         """
@@ -315,42 +327,80 @@ class RAGService:
         logger.info(f"===========================Rag Context=====================================\n{formatted_context}")
         
         # Create main RAG prompt
-        prompt_template = f"""You are a highly proficient AI Research Assistant. Your expertise lies in analyzing and synthesizing information from academic research papers.
+        prompt_template = f"""You are an intelligent AI Assistant specialized in contextual analysis and information synthesis. You excel at understanding diverse types of queries and adapting your response approach accordingly.
 
-You will be provided with a user's query and a collection of context snippets. Each snippet is identified by a 'RefNum' (e.g., RefNum: [1]), its original SourceDocID, Paper name, Page, Paragraph, and RerankScore.
+            You will receive a user query and relevant context snippets. Each snippet contains identification markers (RefNum, source metadata, relevance scores, etc.) that you must use for proper attribution.
 
-Your response must be strictly grounded in these provided snippets. DO NOT use any external knowledge.
+            **CORE PRINCIPLES:**
+            1. **Strict Context Grounding**: Base your response ONLY on the provided context snippets - do not use external knowledge
+            2. **Query-First Approach**: Always prioritize directly answering what the user asked for
+            3. **Adaptive Response Style**: Automatically adjust your approach based on the query type:
+            - Data extraction queries → Extract and present specific requested information directly
+            - Factual queries → Direct, evidence-based answers
+            - Analytical queries → Synthesis and interpretation across sources  
+            - Comparative queries → Structured comparisons and contrasts
+            - Exploratory queries → Comprehensive overviews with multiple perspectives
+            - Technical queries → Detailed explanations with precision
 
-Your primary objectives are:
+            **RESPONSE REQUIREMENTS:**
 
-1. **Comprehensive Answer with Numerical Citations:**
-   - Directly address the user's query using the most pertinent information from the context snippets.
-   - When using information, you MUST cite it inline using the 'RefNum' and relevant page/paragraph details. 
-   - Example: "Concept X is defined as... [1, Page: 3, Para: 2]." or "This is supported by multiple findings [2, Page: 5, Para: 1; 3, Page: 10, Para: 4]."
-   - Synthesize information from multiple relevant snippets to provide comprehensive understanding.
-   - If the context is insufficient, clearly state this limitation.
+            1. **Primary Answer:**
+            - FIRST: Directly extract and present exactly what the user asked for
+            - Use inline citations with available reference details (e.g., [RefNum, Page: X, Para: Y] or [RefNum] if limited metadata)
+            - For data extraction: Present the specific values/information requested in a clear, structured format
+            - For analytical queries: Synthesize information across multiple relevant sources
+            - Always clearly state if context is insufficient for complete answers
 
-2. **Cross-Document Theme Identification:**
-   - Identify 1-3 overarching themes based on ALL provided context snippets relevant to the query.
-   - For each theme, provide a concise summary.
-   - You MUST list the 'RefNum's (e.g., [1], [3], [5]) of the snippets that contribute to each theme.
+            2. **Thematic Analysis** (when multiple sources available):
+            - Identify 1-3 key themes or patterns from the context relevant to the query
+            - Provide concise summaries for each theme
+            - List supporting reference numbers for each theme
 
-User Query: "{query}"
+            3. **Source Transparency:**
+            - Maintain clear traceability between all claims and their sources
+            - Highlight any limitations or gaps in the available context
 
-Provided Context Snippets:
-{formatted_context}
+            **IMPORTANT**: If the user asks for specific data points, values, or information extraction (like "what are the values of A, B, C, D"), focus entirely on extracting and presenting that exact information. Do not provide generic summaries or overarching analysis unless specifically requested.
 
-Please provide your response in the following JSON format:
-- "answer": Your detailed, synthesized answer with inline numerical citations
-- "identified_themes": List of theme objects with "theme_summary" and "supporting_reference_numbers"
-- "references": Bibliography mapping numerical references to source details
+            **User Query:** "{query}"
 
-Each reference must include "reference_number", "source_doc_id", and "file_name"."""
+            **Context Snippets:**
+            {formatted_context}
+
+            **Required Output Format:**
+            ```json
+            {{
+                "answer": "Your comprehensive, contextually-grounded response with inline citations addressing the user's query",
+                "identified_themes": [
+                    {{
+                        "theme_title": "Theme name",
+                        "theme_summary": "Concise description of the theme",
+                        "supporting_reference_numbers": ["List of RefNums supporting this theme"]
+                    }}
+                ],
+                "context_assessment": "Brief evaluation of how well the provided context addresses the query",
+                "references": [
+                    {{
+                        "reference_number": "RefNum from context",
+                        "source_details": "Available source information (doc_id, file_name, page, etc.)"
+                    }}
+                ],
+                "limitations": "Any constraints, gaps, or uncertainties in the available context"
+            }}
+            ```
+
+            Automatically adapt your response depth, technical level, and analytical focus based on what the query is asking for and what the context provides."""
 
         # Call LLM for structured response
         llm_response = self._call_llm_structured(prompt_template)
         logging.info(f"====================LLM STRUCTURED RESPONSE ===============================\n{llm_response}")
         
+        svg = self._get_svg_response(llm_response)
+        if svg:
+            logging.info(f"========================= SVG Generated Sucessfully =============================")
+        else:
+            logging.info(f"---------------------------NO SVG Genearted --------------------------------------")
+
         if not llm_response:
             logger.error("LLM call failed or returned no response.")
             default_empty_response["answer"] = "There was an error processing your query with the language model."
@@ -423,7 +473,8 @@ NOTE: MAKE SURE THAT ANSWER MUST BE TO THE POINT THE USER QUERY
                 "references": generated_references,
                 "retrieved_context_document_ids": final_context_doc_ids_for_tracking,
                 "synthesized_expert_answer": synthesized_expert_answer,
-                "document_details": document_details
+                "document_details": document_details,
+                "svg" : svg
             }
 
         except Exception as e:
