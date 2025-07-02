@@ -177,10 +177,7 @@ class RAGService:
         content = self.svg_chain.invoke({"context": context})
         if content.required:
             return content.svg
-        return """<!-- sample rectangle -->
-        <svg width="200" height="200" xmlns="http://www.w3.org/2000/svg">
-        <rect width="100" height="100" x="50" y="50" fill="red" />
-        </svg>"""
+        return None
             
     def _rerank_documents(self, query: str, documents: List[LangchainDocument], top_n: int) -> List[Tuple[LangchainDocument, float]]:
         """Reranks documents using the CrossEncoder and returns top_n with scores."""

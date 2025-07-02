@@ -238,7 +238,7 @@ class VectorStoreService:
         max_sim = np.max(similarities)
         return max_sim < threshold
 
-    def summarize_collection_in_batches(self, collection_name: str, batch_size: int = 18):
+    def summarize_collection_in_batches(self, collection_name: str, batch_size: int = 18, thresold : int =100):
         # Get collection object
         collection = self.client.get_collection(name=collection_name)
 
@@ -249,7 +249,7 @@ class VectorStoreService:
         if num_docs == 0:
             print("Collection is empty.")
             return
-        if num_docs < 10:
+        if num_docs < thresold:
             return 
         print(f"Summarizing {num_docs} docs in batches of {batch_size}...")
         for i in range(0, num_docs, batch_size):
