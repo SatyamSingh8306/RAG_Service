@@ -176,7 +176,9 @@ class VectorStoreService:
     def _delete_with_access_control(self, user_collection: Optional[str], collection_name: Optional[str]) -> bool:
         accesbile_collection = self.collection_access_map.get(user_collection, [user_collection])
         if collection_name in accesbile_collection:
-            return self.delete_collection(collection_name)
+            self.collection_access_map[user_collection].remove(collection_name)
+            self.save_acess_map()
+            return True
         else:
             print("You don't have access to it")
             return False

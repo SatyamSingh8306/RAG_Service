@@ -252,13 +252,28 @@ def main():
                 if not user_collections:
                     st.info("You do not have any collections you can delete.")
                 else:
+                    # Initialize session state for deletion confirmation if not already set
+                    if "delete_confirmation" not in st.session_state:
+                        st.session_state.delete_confirmation = False
+
+                    # Select collection to delete
                     collection_to_delete = st.selectbox("Select a collection to delete:", user_collections, key="delete_collection_select")
-                    if st.button(f"Delete Collection '{collection_to_delete}'", type="primary", use_container_width=True, key="delete_collection_btn"):
+
+                    # Delete button
+                    if st.button(f"Delete Collection '{collection_to_delete}'", type="primary", use_container_width=True):
                         if not collection_exists(collection_to_delete):
                             st.error(f"Collection '{collection_to_delete}' does not exist.")
                         else:
-                            confirm = st.text_input("Type the collection name to confirm deletion:", key="delete_confirm_input")
-                            if confirm == collection_to_delete:
+                            # Set confirmation state to True to trigger confirmation prompt
+                            st.session_state.delete_confirmation = True
+
+                    # Conditional rendering based on confirmation state
+                    if st.session_state.delete_confirmation:
+                        st.warning(f"Are you sure you want to delete '{collection_to_delete}'?")
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            if st.button("Yes, delete", type="primary", use_container_width=True):
                                 try:
                                     response = requests.delete(
                                         f"{COLLECTIONS_URL}/{collection_to_delete}",
@@ -270,19 +285,29 @@ def main():
                                     )
                                     if response.status_code == 200:
                                         st.success(f"Collection '{collection_to_delete}' deleted successfully.")
+                                        
+                                        # Handle cleanup if needed
                                         if collection_to_delete == st.session_state.selected_collection:
                                             reset_chat_history()
                                             st.session_state.uploaded_file_details = []
                                             st.session_state.processing_info_message = None 
                                             st.session_state.selected_collection = None
                                             st.session_state.user_id = ""
+                                        
+                                        # Reset confirmation and rerun
+                                        st.session_state.delete_confirmation = False
                                         st.rerun()
                                     else:
                                         st.error(f"Failed to delete collection: {response.text}")
+                                        st.session_state.delete_confirmation = False
                                 except Exception as e:
                                     st.error(f"Error deleting collection: {e}")
-                            elif confirm:
-                                st.warning("Collection name does not match. Please type the exact name to confirm.")
+                                    st.session_state.delete_confirmation = False
+                        
+                        with col2:
+                            if st.button("Cancel", use_container_width=True):
+                                st.session_state.delete_confirmation = False
+                                st.rerun()
 
             # --- New: Grant Access Option ---
             with st.expander("Grant Access to Another User", expanded=False):

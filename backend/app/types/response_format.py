@@ -36,5 +36,9 @@ class RAGResponse(BaseModel):
 
 class SVGResponseFormat(BaseModel):
     "Generating SVG Response Format."
-    required : bool = Field(default=False, description="check if svg can be used to represent the data or not")
     svg : Optional[str] = Field(default="Nothing", description="The svg code to represent the data")
+
+class DynamicPrompt(BaseModel):
+    """"Genration of Dynamic Propt"""
+    required : bool = Field(default=False, description="SVG Generation required or not")
+    prompt : Optional[str] = Field(default="no Prompt", description="Prompt required to generate the svg")

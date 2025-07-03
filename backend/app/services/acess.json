@@ -1,9 +1,7 @@
 {
     "satyam1": [
         "satyam1",
-        "satyam2",
-        "satyam3",
-        "aakash"
+        "satyam3"
     ],
     "satyam2": [
         "satyam2",
@@ -21,5 +19,8 @@
     ],
     "aakash": [
         "aakash"
+    ],
+    "satyam100": [
+        "satyam100"
     ]
 }
