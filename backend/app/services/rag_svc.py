@@ -7,6 +7,8 @@ import logging
 
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationSummaryMemory
 from langchain.chains import ConversationChain
@@ -23,10 +25,14 @@ from backend.app import (
     PROJECT_NAME, 
     USE_OLLAMA, 
     OLLAMA_CHAT_MODEL, 
-    OLLAMA_BASE_URL
+    OLLAMA_BASE_URL,
+    GOOGLE_MODEL_NAME,
+    GOOGLE_API_KEY,
+    CROSS_ENCODER_MODEL
 )
 from backend.app.services.vstore_svc import VectorStoreService
-from backend.app.types.response_format import RAGResponse
+from backend.app.types.response_format import RAGResponse, SVGResponseFormat, DynamicPrompt
+from backend.app.services.system_message import SVG_PROMPT, SVG_GENERATION_PROMPT
 
 # For Cross-Encoder Reranking
 from sentence_transformers import CrossEncoder
@@ -47,7 +53,7 @@ class RAGService:
         
         # Initialize Cross-Encoder for reranking
         try:
-            self.reranker_model_name = "cross-encoder/ms-marco-MiniLM-L-6-v2" 
+            self.reranker_model_name = CROSS_ENCODER_MODEL 
             self.reranker = CrossEncoder(self.reranker_model_name, device='cpu') 
             logger.info(f"RAGService initialized with Cross-Encoder: {self.reranker_model_name}")
         except Exception as e:
@@ -67,10 +73,33 @@ class RAGService:
                 self._llm = ChatOllama(
                     model=OLLAMA_CHAT_MODEL,
                     base_url=OLLAMA_BASE_URL,
-                    temperature=0.1,
-                    num_predict=3500,  # Use num_predict instead of max_tokens for Ollama
+                    temperature=0.4,
                 )
+                self.__llm = ChatGoogleGenerativeAI(
+                    model=GOOGLE_MODEL_NAME,
+                    api_key=GOOGLE_API_KEY
+                )
+                # Set up structured output for RAG responses with Ollama
+                self.structured_llm = self._llm.with_structured_output(RAGResponse)
+                
+                # Set up memory and conversation chain for simple responses
+                self.memory = ConversationSummaryMemory(
+                    llm=self._llm, 
+                    return_messages=True,
+                    max_token_limit=5000
+                )
+                self.conversation_chain = ConversationChain(
+                    llm=self._llm, 
+                    memory=self.memory,
+                    verbose=False
+                )
+                
+                # Set up chains for SVG generation
+                self.prompt_chain = SVG_GENERATION_PROMPT | self._llm.with_structured_output(DynamicPrompt)
+                self.svg_chain = SVG_PROMPT | self.__llm.with_structured_output(SVGResponseFormat)
+                
                 logger.info(f"Initialized Ollama LLM: {OLLAMA_CHAT_MODEL}")
+                
             else:
                 if not OPENROUTER_API_KEY:
                     raise ValueError("OpenRouter API key not configured")
@@ -86,31 +115,39 @@ class RAGService:
                         "X-Title": PROJECT_NAME
                     }
                 )
-                logger.info(f"Initialized OpenRouter LLM: {DEFAULT_LLM_MODEL}")
-            
-            # Set up structured output for RAG responses
-            self.structured_llm = self._llm.with_structured_output(RAGResponse)
-            
-            # Set up memory and conversation chain
-            self.memory = ConversationSummaryMemory(
-                llm=self._llm, 
-                return_messages=True,
-                max_token_limit=1000
-            )
-            self.chain = ConversationChain(
-                llm=self._llm, 
-                memory=self.memory,
-                verbose=False
-            )
+
+                self.__llm = ChatGoogleGenerativeAI(
+                    model=GOOGLE_MODEL_NAME,
+                    api_key=GOOGLE_API_KEY
+                )
+                
+                # Set up structured output for RAG responses with OpenRouter
+                self.structured_llm = self._llm.with_structured_output(RAGResponse)
+                
+                # Set up memory and conversation chain for simple responses
+                self.memory = ConversationSummaryMemory(
+                    llm=self._llm, 
+                    return_messages=True,
+                    max_token_limit=5000
+                )
+                self.conversation_chain = ConversationChain(
+                    llm=self._llm, 
+                    memory=self.memory,
+                    verbose=False
+                )
+                
+                # Set up chains for SVG generation
+                self.prompt_chain = SVG_GENERATION_PROMPT | self._llm.with_structured_output(DynamicPrompt)
+                self.svg_chain = SVG_PROMPT | self.__llm.with_structured_output(SVGResponseFormat)
             
         except Exception as e:
             logger.error(f"Unable to configure LLM: {e}")
             self._llm = None
             self.structured_llm = None
-            self.chain = None
+            self.conversation_chain = None
 
     def _call_llm_structured(self, prompt: str) -> Optional[RAGResponse]:
-        """Call LLM with structured output parsing"""
+        """Call LLM with structured output parsing for RAGResponse format"""
         if not self.structured_llm:
             logger.error("Structured LLM not initialized")
             return None
@@ -118,58 +155,91 @@ class RAGService:
         try:
             logger.info("Calling LLM for structured response...")
             
-            # Add format instructions to the prompt
-            format_instructions = self.json_parser.get_format_instructions()
-            full_prompt = f"{prompt}\n\n{format_instructions}"
-            
             if USE_OLLAMA:
-                # For Ollama, use the conversation chain
-                response = self.chain.invoke({"input": full_prompt})
-                if isinstance(response, dict) and "response" in response:
-                    response_text = response["response"]
-                else:
-                    response_text = str(response)
-                
-                # Parse the response manually for Ollama
+                # For Ollama, we need to be more explicit about structured output
                 try:
-                    parsed_response = self.json_parser.parse(response_text)
-                    return RAGResponse(**parsed_response)
-                except Exception as parse_error:
-                    logger.error(f"Failed to parse Ollama response: {parse_error}")
-                    # Fallback to basic response
-                    return RAGResponse(
-                        answer=response_text,
-                        identified_themes=[],
-                        references=[]
-                    )
+                    # First attempt with structured output
+                    response = self.structured_llm.invoke(prompt)
+                    if isinstance(response, RAGResponse):
+                        return response
+                    
+                    # If that fails, try manual parsing
+                    if isinstance(response, str):
+                        parsed_response = self.json_parser.parse(response)
+                        return RAGResponse(**parsed_response)
+                    
+                except Exception as ollama_error:
+                    logger.warning(f"Ollama structured output failed: {ollama_error}, trying fallback")
+                    
+                    # Fallback: use conversation chain with format instructions
+                    format_instructions = self.json_parser.get_format_instructions()
+                    full_prompt = f"{prompt}\n\n{format_instructions}"
+                    
+                    response = self.conversation_chain.invoke({"input": full_prompt})
+                    response_text = response.get("response", str(response))
+                    
+                    try:
+                        parsed_response = self.json_parser.parse(response_text)
+                        return RAGResponse(**parsed_response)
+                    except Exception as parse_error:
+                        logger.error(f"Failed to parse Ollama response: {parse_error}")
+                        # Return basic response structure
+                        return RAGResponse(
+                            answer=response_text,
+                            identified_themes=[],
+                            references=[],
+                            context_assessment="Unable to parse structured response",
+                            limitations="Response parsing failed"
+                        )
             else:
-                # For OpenRouter, use structured output
-                response = self.structured_llm.invoke(full_prompt)
+                # For OpenRouter, use structured output directly
+                response = self.structured_llm.invoke(prompt)
                 return response
                 
         except Exception as e:
-            logger.error(f"Error calling LLM: {e}")
+            logger.error(f"Error calling structured LLM: {e}")
             return None
 
     def _call_llm_simple(self, prompt: str) -> Optional[str]:
-        """Call LLM for simple text response"""
-        if not self._llm:
-            logger.error("LLM not initialized")
+        """Call LLM for simple text response using conversation chain"""
+        if not self.conversation_chain:
+            logger.error("Conversation chain not initialized")
             return None
             
         try:
-            logger.info("Calling LLM for simple response...")
-            response = self._llm.invoke(prompt)
+            logger.info("Calling LLM for simple response using conversation chain...")
             
-            if hasattr(response, 'content'):
+            # Use conversation chain for simple responses
+            response = self.conversation_chain.invoke({"input": prompt})
+            
+            # Extract response text
+            if isinstance(response, dict) and "response" in response:
+                return response["response"]
+            elif hasattr(response, 'content'):
                 return response.content
             else:
                 return str(response)
                 
         except Exception as e:
-            logger.error(f"Error calling LLM: {e}")
+            logger.error(f"Error calling simple LLM: {e}")
             return None
 
+    def _get_svg_response(self, context) -> Optional[str]:
+        """Generate SVG response if required"""
+        try:
+            if not self.prompt_chain or not self.svg_chain:
+                logger.warning("SVG chains not initialized")
+                return None
+                
+            svg_prompt = self.prompt_chain.invoke({"context": context})
+            if hasattr(svg_prompt, 'required') and svg_prompt.required:
+                content = self.svg_chain.invoke({"prompt": svg_prompt.prompt})
+                return content.svg if hasattr(content, 'svg') else None
+            return None
+        except Exception as e:
+            logger.error(f"Error generating SVG: {e}")
+            return None
+            
     def _rerank_documents(self, query: str, documents: List[LangchainDocument], top_n: int) -> List[Tuple[LangchainDocument, float]]:
         """Reranks documents using the CrossEncoder and returns top_n with scores."""
         if not self.reranker or not documents:
@@ -223,7 +293,7 @@ class RAGService:
     def get_answer_and_themes(self, 
                             query: str, 
                             collection_name: Optional[str] = None, 
-                            n_final_docs_for_llm: int = 20, 
+                            n_final_docs_for_llm: int = 10, 
                             initial_mmr_k: int = 100, 
                             initial_mmr_fetch_k: int = 200) -> Dict[str, Any]:
         """
@@ -239,7 +309,8 @@ class RAGService:
             "references": [],
             "retrieved_context_document_ids": [],
             "document_details": [],
-            "synthesized_expert_answer": ""
+            "synthesized_expert_answer": "",
+            "svg": None
         }
 
         # Validate vector store
@@ -315,42 +386,57 @@ class RAGService:
         logger.info(f"===========================Rag Context=====================================\n{formatted_context}")
         
         # Create main RAG prompt
-        prompt_template = f"""You are a highly proficient AI Research Assistant. Your expertise lies in analyzing and synthesizing information from academic research papers.
+        prompt_template = f"""You are an intelligent AI Assistant specialized in contextual analysis and information synthesis. You excel at understanding diverse types of queries and adapting your response approach accordingly.
 
-You will be provided with a user's query and a collection of context snippets. Each snippet is identified by a 'RefNum' (e.g., RefNum: [1]), its original SourceDocID, Paper name, Page, Paragraph, and RerankScore.
+You will receive a user query and relevant context snippets. Each snippet contains identification markers (RefNum, source metadata, relevance scores, etc.) that you must use for proper attribution.
 
-Your response must be strictly grounded in these provided snippets. DO NOT use any external knowledge.
+**CORE PRINCIPLES:**
+1. **Strict Context Grounding**: Base your response ONLY on the provided context snippets - do not use external knowledge
+2. **Query-First Approach**: Always prioritize directly answering what the user asked for
+3. **Adaptive Response Style**: Automatically adjust your approach based on the query type:
+   - Data extraction queries → Extract and present specific requested information directly
+   - Factual queries → Direct, evidence-based answers
+   - Analytical queries → Synthesis and interpretation across sources  
+   - Comparative queries → Structured comparisons and contrasts
+   - Exploratory queries → Comprehensive overviews with multiple perspectives
+   - Technical queries → Detailed explanations with precision
 
-Your primary objectives are:
+**RESPONSE REQUIREMENTS:**
 
-1. **Comprehensive Answer with Numerical Citations:**
-   - Directly address the user's query using the most pertinent information from the context snippets.
-   - When using information, you MUST cite it inline using the 'RefNum' and relevant page/paragraph details. 
-   - Example: "Concept X is defined as... [1, Page: 3, Para: 2]." or "This is supported by multiple findings [2, Page: 5, Para: 1; 3, Page: 10, Para: 4]."
-   - Synthesize information from multiple relevant snippets to provide comprehensive understanding.
-   - If the context is insufficient, clearly state this limitation.
+1. **Primary Answer:**
+   - FIRST: Directly extract and present exactly what the user asked for
+   - Use inline citations with available reference details (e.g., [RefNum, Page: X, Para: Y] or [RefNum] if limited metadata)
+   - For data extraction: Present the specific values/information requested in a clear, structured format
+   - For analytical queries: Synthesize information across multiple relevant sources
+   - Always clearly state if context is insufficient for complete answers
 
-2. **Cross-Document Theme Identification:**
-   - Identify 1-3 overarching themes based on ALL provided context snippets relevant to the query.
-   - For each theme, provide a concise summary.
-   - You MUST list the 'RefNum's (e.g., [1], [3], [5]) of the snippets that contribute to each theme.
+2. **Thematic Analysis** (when multiple sources available):
+   - Identify 1-3 key themes or patterns from the context relevant to the query
+   - Provide concise summaries for each theme
+   - List supporting reference numbers for each theme
 
-User Query: "{query}"
+3. **Source Transparency:**
+   - Maintain clear traceability between all claims and their sources
+   - Highlight any limitations or gaps in the available context
 
-Provided Context Snippets:
+**IMPORTANT**: If the user asks for specific data points, values, or information extraction (like "what are the values of A, B, C, D"), focus entirely on extracting and presenting that exact information. Do not provide generic summaries or overarching analysis unless specifically requested.
+
+**User Query:** "{query}"
+
+**Context Snippets:**
 {formatted_context}
 
-Please provide your response in the following JSON format:
-- "answer": Your detailed, synthesized answer with inline numerical citations
-- "identified_themes": List of theme objects with "theme_summary" and "supporting_reference_numbers"
-- "references": Bibliography mapping numerical references to source details
-
-Each reference must include "reference_number", "source_doc_id", and "file_name"."""
+Please provide a structured response that includes:
+- A comprehensive answer with inline citations
+- Identified themes with supporting references
+- Context assessment
+- References used
+- Any limitations in the available context"""
 
         # Call LLM for structured response
         llm_response = self._call_llm_structured(prompt_template)
         logging.info(f"====================LLM STRUCTURED RESPONSE ===============================\n{llm_response}")
-        
+
         if not llm_response:
             logger.error("LLM call failed or returned no response.")
             default_empty_response["answer"] = "There was an error processing your query with the language model."
@@ -395,24 +481,29 @@ Each reference must include "reference_number", "source_doc_id", and "file_name"
                 for ref in llm_response.references
             ]
 
-            # Generate synthesized expert answer
+            # Generate synthesized expert answer using conversation chain
             research_assistant_prompt = f"""You are now acting as a Research Assistant. Given the following user query and the previous LLM answer, synthesize a new expert answer that provides additional insights, clarifications, or a more comprehensive perspective.
 
 User Query: {query}
 
-Previous LLM Answer: {final_answer}
+LLM Answer: {final_answer}
 
-context : {formatted_context}
+Context: {formatted_context}
 
 Your task is to provide a synthesized expert answer that combines the information from both the user query and the previous answer, offering deeper analysis and expert insights.
-NOTE: MAKE SURE THAT ANSWER MUST BE TO THE POINT THE USER QUERY
-
-"""
+NOTE: MAKE SURE THAT ANSWER MUST BE TO THE POINT THE USER QUERY"""
 
             synthesized_expert_answer = self._call_llm_simple(research_assistant_prompt)
-            logging.info(f"====================LLM STRUCTURED RESPONSE ===============================\n{synthesized_expert_answer}")
+            logging.info(f"====================SYNTHESIZED EXPERT ANSWER ===============================\n{synthesized_expert_answer}")
             if not synthesized_expert_answer:
                 synthesized_expert_answer = "Unable to generate synthesized expert answer."
+
+            # Generate SVG if applicable
+            svg = self._get_svg_response(synthesized_expert_answer)
+            if svg:
+                logging.info(f"========================= SVG Generated Successfully =============================")
+            else:
+                logging.info(f"---------------------------NO SVG Generated --------------------------------------")
 
             logger.info("RAG processing completed successfully")
             logger.info(f"Generated {len(identified_themes)} themes and {len(generated_references)} references")
@@ -423,7 +514,8 @@ NOTE: MAKE SURE THAT ANSWER MUST BE TO THE POINT THE USER QUERY
                 "references": generated_references,
                 "retrieved_context_document_ids": final_context_doc_ids_for_tracking,
                 "synthesized_expert_answer": synthesized_expert_answer,
-                "document_details": document_details
+                "document_details": document_details,
+                "svg": svg
             }
 
         except Exception as e:
@@ -434,7 +526,7 @@ NOTE: MAKE SURE THAT ANSWER MUST BE TO THE POINT THE USER QUERY
 
 # --- Test Block ---
 if __name__ == "__main__":
-    logger.info("Testing RAGService with ChatOpenAI integration")
+    logger.info("Testing RAGService with proper chain usage")
     
     vstore_service = VectorStoreService()
     if not vstore_service._langchain_chroma_instance:

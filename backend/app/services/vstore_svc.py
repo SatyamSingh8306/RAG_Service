@@ -9,10 +9,12 @@ import chromadb
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document as LangchainDocument
+from langchain_ollama import ChatOllama
 import os
+import time
 
 # from backend.app.core.config import settings
-from backend.app import EMBEDDING_MODEL_NAME,CHROMA_DB_PATH,CHROMA_COLLECTION_NAME
+from backend.app import EMBEDDING_MODEL_NAME,CHROMA_DB_PATH,CHROMA_COLLECTION_NAME,OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -40,6 +42,10 @@ class VectorStoreService:
             )
             self.path_db = r"backend\app\services\acess.json"
             self.load_access_map_from_json()
+            self._llm = ChatOllama(
+                model = OLLAMA_CHAT_MODEL,
+                base_url = OLLAMA_BASE_URL
+            )
             logger.info("HuggingFaceEmbeddings loaded successfully.")
         except Exception as e:
             logger.error(f"Error loading HuggingFaceEmbeddings: {e}")
@@ -170,7 +176,9 @@ class VectorStoreService:
     def _delete_with_access_control(self, user_collection: Optional[str], collection_name: Optional[str]) -> bool:
         accesbile_collection = self.collection_access_map.get(user_collection, [user_collection])
         if collection_name in accesbile_collection:
-            return self.delete_collection(collection_name)
+            self.collection_access_map[user_collection].remove(collection_name)
+            self.save_acess_map()
+            return True
         else:
             print("You don't have access to it")
             return False
@@ -231,6 +239,47 @@ class VectorStoreService:
         similarities = cosine_similarity(embedding1, embedding2)
         max_sim = np.max(similarities)
         return max_sim < threshold
+
+    def summarize_collection_in_batches(self, collection_name: str, batch_size: int = 18, thresold : int =100):
+        # Get collection object
+        collection = self.client.get_collection(name=collection_name)
+
+        # Fetch all current documents
+        current_docs = collection.get()
+        num_docs = len(current_docs["ids"])
+
+        if num_docs == 0:
+            print("Collection is empty.")
+            return
+        if num_docs < thresold:
+            return 
+        print(f"Summarizing {num_docs} docs in batches of {batch_size}...")
+        for i in range(0, num_docs, batch_size):
+            # Get new snapshot of documents and ids
+            current_docs = collection.get()
+
+            batch_ids = current_docs["ids"][i:i+batch_size]
+            batch_docs = current_docs["documents"][i:i+batch_size]
+
+            if not batch_ids:
+                continue
+
+            print(f"Processing batch {i // batch_size + 1} with {len(batch_ids)} docs...")
+
+            # Delete old batch immediately
+            collection.delete(ids=batch_ids)
+            # Combine text
+            big_text = "\n\n".join(batch_docs)
+            # Summarize
+            summary_text = self._llm.invoke(f"Summarize the following text into one concise document: {big_text}")
+            # Create new embedding
+            summary_embedding = self.embedding_function.embed_documents([summary_text.content])[0]
+            # Add summarized document
+            summary_id = f"summary_batch_{i}_{int(time.time())}"
+            collection.add(documents=[summary_text.content], embeddings=[summary_embedding], ids=[summary_id])
+            print(f"Batch {i // batch_size + 1} summarized, deleted, and replaced.")
+
+        print("All batches summarized.")
 
     def add_documents(self, chunks: List[str], metadatas: List[Dict[str, Any]], doc_ids: Optional[List[str]] = None, collection_name: Optional[str] = None) -> bool:
         """Add documents to the vector store."""
@@ -302,6 +351,7 @@ class VectorStoreService:
                     ids=final_ids
                 )
             print(f"Successfully stored {len(added_ids)} chunks in collection '{collection}'.\n{'='*60}")
+            self.summarize_collection_in_batches(collection_name=collection_name)
             return True
         except Exception as e:
             print(f"Error adding documents via LangChain Chroma: {e}")
